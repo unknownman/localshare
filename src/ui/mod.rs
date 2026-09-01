@@ -1,3 +1,21 @@
+//! Terminal UI: rendering tunnel progress and errors for humans and scripts.
+//!
+//! [`run_ui`] consumes [`TunnelEvent`]s from the tunnel engine and renders them
+//! in one of four modes selected by the CLI flags:
+//!
+//! - **interactive** (default) — a welcoming banner, QR code, and a live
+//!   request log for a human at a terminal.
+//! - **json** — machine-readable events, one JSON object per line.
+//! - **quiet** — only the public URL and fatal errors.
+//! - **log** — a plain stderr event stream that stays readable when verbose
+//!   `tracing` output is enabled (`-vv` and above).
+//!
+//! The UI never enters raw mode, hides the cursor, or switches screens, so
+//! there is no terminal state to restore on exit. Fatal tunnel failures are
+//! rendered as an [`error_view::ErrorView`] with an actionable hint (see
+//! [`format_disconnect`]) and surfaced to `main` as a `FatalTunnelError` so the
+//! process can exit non-zero.
+
 use crate::cli::Cli;
 use crate::tunnel::client::{TunnelEvent, TunnelSession};
 use std::io::{self, IsTerminal, Write};
@@ -208,8 +226,9 @@ async fn run_interactive_mode(
             Ok(TunnelEvent::Connected { session }) => {
                 print_banner(&session, config, supports_color);
                 banner_printed = true;
-                if !config.no_qr {
-                    print_qr(&session, supports_color);
+                if let Some(qr) = qr_output(config, &session, supports_color) {
+                    eprintln!("Scan with your phone:\n");
+                    println!("{}", qr);
                 }
                 eprintln!("\nPress Ctrl+C to stop sharing.\n");
                 eprintln!("Recent Requests:");
@@ -275,6 +294,27 @@ fn format_disconnect(reason: &str) -> error_view::ErrorView<'static> {
             "Registration rejected",
             Some("Try a different subdomain with -s <name>."),
         )
+    } else if lower.contains("serverfull")
+        || lower.contains("server full")
+        || lower.contains("at capacity")
+    {
+        (
+            "Relay is at capacity",
+            Some("The relay has no free slots right now. Wait a moment and retry, or point -r at a different relay."),
+        )
+    } else if lower.contains("unsupportedclient")
+        || lower.contains("client version")
+        || lower.contains("version not supported")
+    {
+        (
+            "Client version rejected",
+            Some("This version of localshare is not supported by the relay. Update it with: cargo install localshare --force."),
+        )
+    } else if lower.contains("tls") || lower.contains("ssl") || lower.contains("certificate") {
+        (
+            "Could not verify relay certificate",
+            Some("The relay's TLS certificate could not be verified. Check that -r uses wss:// and points at a trusted relay."),
+        )
     } else if lower.contains("timed out")
         || lower.contains("timeout")
         || lower.contains("handshake")
@@ -295,6 +335,8 @@ fn format_disconnect(reason: &str) -> error_view::ErrorView<'static> {
     } else if lower.contains("refused")
         || lower.contains("could not connect")
         || lower.contains("not reachable")
+        || lower.contains("no route to host")
+        || lower.contains("unreachable")
     {
         (
             "Could not reach relay",
@@ -337,18 +379,25 @@ fn print_banner(session: &TunnelSession, config: &Cli, supports_color: bool) {
     println!("{}\n", banner);
 }
 
-fn print_qr(session: &TunnelSession, supports_color: bool) {
-    if !supports_color || session.public_url.is_empty() {
-        return;
+/// Return the terminal QR code to render for a session, or `None` when QR
+/// output is disabled — via `--no-qr`, a non-interactive (piped) stdout, or a
+/// session that has no public URL yet. Keeping the decision separate from the
+/// print call makes it deterministic and unit-testable.
+fn qr_output(
+    config: &Cli,
+    session: &TunnelSession,
+    supports_color: bool,
+) -> Option<qr::TerminalQr> {
+    if config.no_qr || !supports_color || session.public_url.is_empty() {
+        return None;
     }
-    eprintln!("Scan with your phone:\n");
-    let qr = qr::render_qr(&session.public_url);
-    println!("{}", qr);
+    Some(qr::render_qr(&session.public_url))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     fn hint_of(reason: &str) -> Option<String> {
         format_disconnect(reason).hint
@@ -403,9 +452,88 @@ mod tests {
     }
 
     #[test]
+    fn hint_for_server_full_suggests_retry_or_other_relay() {
+        assert_hint(
+            "registration rejected by relay: ServerFull",
+            "no free slots",
+        );
+    }
+
+    #[test]
+    fn hint_for_unsupported_client_suggests_update() {
+        assert_hint(
+            "registration rejected by relay: UnsupportedClient",
+            "cargo install localshare",
+        );
+    }
+
+    #[test]
+    fn hint_for_tls_failure_suggests_wss() {
+        assert_hint(
+            "connection to relay wss://relay.example.com/ failed: TLS handshake failure: invalid peer certificate",
+            "wss://",
+        );
+    }
+
+    #[test]
+    fn hint_for_network_unreachable_suggests_network() {
+        assert_hint(
+            "connection to relay ws://10.0.0.1/ failed: Network is unreachable",
+            "Check the relay address",
+        );
+    }
+
+    #[test]
     fn unknown_reasons_still_render_message_without_hint() {
         let view = format_disconnect("some opaque failure");
         assert!(view.hint.is_none());
         assert!(view.to_string().contains("some opaque failure"));
+    }
+
+    // ── QR output gating ──────────────────────────────────────────────────────
+
+    fn session_with(url: &str) -> TunnelSession {
+        TunnelSession {
+            subdomain: "demo".into(),
+            public_url: url.into(),
+            heartbeat_interval_ms: 60_000,
+        }
+    }
+
+    fn cli_with(args: &[&str]) -> Cli {
+        Cli::parse_from(std::iter::once("localshare").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn qr_suppressed_with_no_qr_flag() {
+        let config = cli_with(&["3000", "--no-qr"]);
+        let qr = qr_output(&config, &session_with("https://demo.localshare.dev"), true);
+        assert!(qr.is_none(), "--no-qr must suppress the QR matrix");
+    }
+
+    #[test]
+    fn qr_suppressed_when_stdout_is_not_a_terminal() {
+        let config = cli_with(&["3000"]);
+        let qr = qr_output(&config, &session_with("https://demo.localshare.dev"), false);
+        assert!(qr.is_none(), "piped output must suppress the QR matrix");
+    }
+
+    #[test]
+    fn qr_suppressed_for_session_without_public_url() {
+        let config = cli_with(&["3000"]);
+        let qr = qr_output(&config, &session_with(""), true);
+        assert!(qr.is_none(), "empty public_url must suppress the QR matrix");
+    }
+
+    #[test]
+    fn qr_rendered_when_enabled_on_a_terminal() {
+        let config = cli_with(&["3000"]);
+        let qr = qr_output(&config, &session_with("https://demo.localshare.dev"), true)
+            .expect("QR should be rendered on a terminal without --no-qr");
+        let text = qr.to_string();
+        assert!(
+            text.contains('█') || text.contains('▀') || text.contains('▄'),
+            "QR should contain block characters, got: {text:?}"
+        );
     }
 }

@@ -1,3 +1,15 @@
+//! Command-line interface definition and argument validation.
+//!
+//! [`Cli`] is the canonical struct parsed by Clap. It owns two pieces of
+//! validation logic that are unit-tested heavily:
+//!
+//! - [`parse_target`] — a local `port` or `host:port` target.
+//! - [`validate_subdomain`] — a relay subdomain (lowercase alphanumerics and
+//!   dashes, and of bounded length).
+//!
+//! [`LocalTarget`] is re-exported at `crate::tunnel::protocol::LocalTarget` so
+//! the engine and the CLI share one definition of "where to forward".
+
 use clap::{builder::styling::*, ArgAction, Parser};
 use std::fmt;
 

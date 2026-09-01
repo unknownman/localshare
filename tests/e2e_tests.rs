@@ -17,7 +17,7 @@ use tokio_tungstenite::accept_async;
 // Duplicated here intentionally: this test validates interop with the real
 // binary over the wire, so it must not import the crate's internals.
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseErrorCode {
     TargetConnectionRefused,
@@ -251,6 +251,198 @@ async fn spawn_mock_local(body: &'static [u8]) -> u16 {
     });
 
     port
+}
+
+// ── Faulty-then-healthy local server ──────────────────────────────────────────
+
+/// How the local server should misbehave on its *first* accepted connection.
+#[derive(Debug, Clone, Copy)]
+enum FaultBehavior {
+    /// Accept, read the request head, then close without responding.
+    DropAfterAccept,
+    /// Accept, read the request head, then reply with bytes that are not a
+    /// valid HTTP response before closing.
+    MalformedResponse,
+}
+
+/// Spawn a local server that misbehaves on its first connection (per
+/// `FaultBehavior`) and then serves a normal `200 OK` on the second. This lets
+/// us assert that after a forwarding failure the tunnel keeps working for the
+/// next request (no spin, no deadlock).
+async fn spawn_faulty_then_healthy(behavior: FaultBehavior) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind local");
+    let port = listener.local_addr().expect("local addr").port();
+
+    tokio::spawn(async move {
+        // First connection: read the request head, then follow the fault.
+        let (mut socket, _) = listener.accept().await.expect("accept first");
+        let mut buf = vec![0u8; 4096];
+        let mut received = Vec::new();
+        loop {
+            let n = socket.read(&mut buf).await.expect("read first");
+            if n == 0 {
+                break;
+            }
+            received.extend_from_slice(&buf[..n]);
+            if received.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        match behavior {
+            FaultBehavior::DropAfterAccept => drop(socket),
+            FaultBehavior::MalformedResponse => {
+                let _ = socket
+                    .write_all(b"THIS IS NOT AN HTTP RESPONSE\r\n\r\n")
+                    .await;
+            }
+        }
+
+        // Second connection: healthy 200 OK.
+        let (mut socket, _) = listener.accept().await.expect("accept second");
+        let mut buf = vec![0u8; 4096];
+        let mut received = Vec::new();
+        loop {
+            let n = socket.read(&mut buf).await.expect("read second");
+            if n == 0 {
+                break;
+            }
+            received.extend_from_slice(&buf[..n]);
+            if received.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let body = b"healthy after fault";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).expect("utf8 body")
+        );
+        socket
+            .write_all(response.as_bytes())
+            .await
+            .expect("write second response");
+    });
+
+    port
+}
+
+// ── Relay that drives an error then a success ─────────────────────────────────
+
+/// Spawn a mock relay that proxies *two* sequential GET requests. The first
+/// request is sent to a locally-faulty server and must produce a `ResponseError`
+/// (which the client synthesises into a 502); the second goes to the now-healthy
+/// server and must come back as HTTP 200. Reporting both proves the forwarding
+/// loop survives a failure and serves the next request.
+async fn spawn_mock_relay_error_then_ok() -> (u16, oneshot::Receiver<(ResponseErrorCode, u16)>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind relay");
+    let port = listener.local_addr().expect("relay addr").port();
+    let (tx, rx) = oneshot::channel();
+
+    tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.expect("accept client");
+        let mut ws = accept_async(tcp).await.expect("ws handshake");
+        let deadline = Duration::from_secs(10);
+
+        // Registration handshake.
+        let first = ws
+            .next()
+            .await
+            .expect("client should send Register")
+            .expect("frame ok");
+        let msg = Message::from_ws(&first).expect("first frame should parse");
+        assert!(matches!(msg.payload, Payload::Register { .. }));
+        ws.send(
+            Message::new(Payload::Registered {
+                subdomain: "e2e-fault".into(),
+                public_url: "https://e2e-fault.localshare.dev".into(),
+                heartbeat_interval_ms: 60_000,
+            })
+            .to_binary(),
+        )
+        .await
+        .expect("send Registered");
+
+        // Request 1 → expect a ResponseError.
+        ws.send(
+            Message::new(Payload::RequestStart {
+                stream_id: 1,
+                method: "GET".into(),
+                path: "/fault".into(),
+                headers: vec![],
+            })
+            .to_binary(),
+        )
+        .await
+        .expect("send RequestStart 1");
+        ws.send(Message::new(Payload::RequestEnd { stream_id: 1 }).to_binary())
+            .await
+            .expect("send RequestEnd 1");
+
+        let mut first_error: Option<ResponseErrorCode> = None;
+        while first_error.is_none() {
+            let frame = tokio::time::timeout(deadline, ws.next())
+                .await
+                .expect("timed out waiting for ResponseError")
+                .expect("websocket closed before ResponseError")
+                .expect("websocket error");
+            let Some(msg) = Message::from_ws(&frame) else {
+                continue;
+            };
+            match msg.payload {
+                Payload::ClientPing => {
+                    ws.send(Message::new(Payload::RelayPong).to_binary())
+                        .await
+                        .expect("send RelayPong");
+                }
+                Payload::ResponseError { code, .. } => first_error = Some(code),
+                _ => {}
+            }
+        }
+
+        // Request 2 → the tunnel must still be alive and forward a healthy 200.
+        ws.send(
+            Message::new(Payload::RequestStart {
+                stream_id: 2,
+                method: "GET".into(),
+                path: "/ok".into(),
+                headers: vec![],
+            })
+            .to_binary(),
+        )
+        .await
+        .expect("send RequestStart 2");
+        ws.send(Message::new(Payload::RequestEnd { stream_id: 2 }).to_binary())
+            .await
+            .expect("send RequestEnd 2");
+
+        let mut status2: Option<u16> = None;
+        while status2.is_none() {
+            let frame = tokio::time::timeout(deadline, ws.next())
+                .await
+                .expect("timed out waiting for second response")
+                .expect("websocket closed before second response")
+                .expect("websocket error");
+            let Some(msg) = Message::from_ws(&frame) else {
+                continue;
+            };
+            match msg.payload {
+                Payload::ClientPing => {
+                    ws.send(Message::new(Payload::RelayPong).to_binary())
+                        .await
+                        .expect("send RelayPong");
+                }
+                Payload::ResponseStart { status_code, .. } => status2 = Some(status_code),
+                _ => {}
+            }
+        }
+
+        let _ = tx.send((
+            first_error.expect("response error observed"),
+            status2.expect("status2"),
+        ));
+    });
+
+    (port, rx)
 }
 
 // ── Helpers to drive the binary ────────────────────────────────────────────────
@@ -490,4 +682,50 @@ async fn e2e_sigint_gracefully_unregisters_and_exits_zero() {
 #[tokio::test]
 async fn e2e_sigterm_gracefully_unregisters_and_exits_zero() {
     assert_graceful_shutdown(libc::SIGTERM).await;
+}
+
+// ── Failure recovery: fault then next request succeeds ────────────────────────
+
+/// Shared assertion for the two failure-recovery scenarios: the first request
+/// hits a faulty local server and the client synthesises a 502, then a second
+/// request is served 200 — proving the forwarding loop neither spins nor dies.
+async fn assert_fault_then_next_request_ok(behavior: FaultBehavior) {
+    let target_port = spawn_faulty_then_healthy(behavior).await;
+    let (relay_port, rx) = spawn_mock_relay_error_then_ok().await;
+
+    let child = spawn_child(relay_port, target_port);
+
+    let (err_code, status2) = tokio::time::timeout(Duration::from_secs(20), rx)
+        .await
+        .expect("mock relay timed out")
+        .expect("mock relay task failed");
+
+    assert_eq!(
+        err_code,
+        ResponseErrorCode::LocalIoError,
+        "first request must yield a LocalIoError ResponseError"
+    );
+    assert_eq!(status2, 200, "second request must be served with HTTP 200");
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let stdout = kill_and_drain(child);
+
+    assert!(
+        stdout.contains("\"status\":502"),
+        "client must have logged a 502 for the failed request"
+    );
+    assert!(
+        stdout.contains("\"status\":200"),
+        "client must have logged a 200 for the recovered request"
+    );
+}
+
+#[tokio::test]
+async fn e2e_target_drop_mid_request_then_next_request_succeeds() {
+    assert_fault_then_next_request_ok(FaultBehavior::DropAfterAccept).await;
+}
+
+#[tokio::test]
+async fn e2e_malformed_response_then_next_request_succeeds() {
+    assert_fault_then_next_request_ok(FaultBehavior::MalformedResponse).await;
 }

@@ -1,3 +1,11 @@
+//! Error types shared across the crate.
+//!
+//! [`RelayError`] describes failures talking to the public relay,
+//! [`LocalForwardError`] describes failures talking to the user's local server,
+//! and [`ProtocolError`] describes wire-protocol corruption or version
+//! mismatches. The UI layer classifies these (via their rendered strings) into
+//! friendly [`ErrorView`](crate::ui::error_view::ErrorView) diagnostics.
+
 use thiserror::Error;
 
 // Re-export the canonical serde-compatible RejectReason from the protocol layer.

@@ -53,7 +53,9 @@ pub fn process_stream(
         .await
         {
             tracing::warn!(stream_id, target = %target, error = %e, "stream forwarding failed");
-            // Best-effort: inform the relay so it can send a 502.
+            // Best-effort: inform the relay so it can send a 502. This is the
+            // single place a `ResponseError` is emitted per stream (the caller
+            // must NOT also send one), so the relay never sees a duplicate.
             let _ = response_tx
                 .send(Message::new(Payload::ResponseError {
                     stream_id,
@@ -63,7 +65,14 @@ pub fn process_stream(
                         }
                         _ => ResponseErrorCode::LocalIoError,
                     },
-                    message: e.to_string(),
+                    message: match &e {
+                        LocalForwardError::TargetConnectionRefused(target) => {
+                            format!(
+                                "Connection refused to {target} — is your local server running?"
+                            )
+                        }
+                        other => other.to_string(),
+                    },
                 }))
                 .await;
         }
@@ -85,17 +94,8 @@ async fn forward_request(
     let stream = match tokio::net::TcpStream::connect((target.host.as_str(), target.port)).await {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
-            response_tx
-                .send(Message::new(Payload::ResponseError {
-                    stream_id,
-                    code: ResponseErrorCode::TargetConnectionRefused,
-                    message: format!(
-                        "Connection refused to {}:{} — is your local server running?",
-                        target.host, target.port
-                    ),
-                }))
-                .await
-                .ok();
+            // The `ResponseError` is emitted by the calling `process_stream`
+            // wrapper so it is guaranteed to be sent exactly once.
             return Err(LocalForwardError::target_connection_refused(
                 target.host.clone(),
                 target.port,
@@ -595,5 +595,102 @@ mod tests {
         assert!(got_start, "ResponseStart not received");
         assert_eq!(body, b"hello", "body mismatch");
         assert!(got_end, "ResponseEnd not received");
+    }
+
+    // ── local server drops mid-request → ResponseError(LocalIoError) ──────────
+
+    #[tokio::test]
+    async fn target_drops_after_accept_sends_response_error() {
+        // The server accepts the connection, reads the request, then closes
+        // without ever writing a response.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = socket.read(&mut buf).await;
+            drop(socket);
+        });
+
+        let target = make_target(port);
+        let (response_tx, mut response_rx) = mpsc::channel::<Message>(8);
+        let (req_tx, req_rx) = mpsc::channel::<StreamMessage>(8);
+
+        process_stream(
+            7,
+            "GET".into(),
+            "/".into(),
+            vec![],
+            target,
+            req_rx,
+            response_tx,
+        );
+        req_tx
+            .send(StreamMessage::Payload(Payload::RequestEnd { stream_id: 7 }))
+            .await
+            .unwrap();
+
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), response_rx.recv())
+            .await
+            .expect("timed out waiting for ResponseError")
+            .expect("channel closed");
+
+        match msg.payload {
+            Payload::ResponseError {
+                code: ResponseErrorCode::LocalIoError,
+                ..
+            } => {}
+            other => panic!("expected ResponseError(LocalIoError), got {:?}", other),
+        }
+    }
+
+    // ── malformed local HTTP response → ResponseError(LocalIoError) ────────────
+
+    #[tokio::test]
+    async fn malformed_response_sends_response_error() {
+        // The server responds with bytes that are not a valid HTTP response,
+        // then closes the connection.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket
+                .write_all(b"THIS IS NOT AN HTTP RESPONSE\r\n\r\n")
+                .await;
+            drop(socket);
+        });
+
+        let target = make_target(port);
+        let (response_tx, mut response_rx) = mpsc::channel::<Message>(8);
+        let (req_tx, req_rx) = mpsc::channel::<StreamMessage>(8);
+
+        process_stream(
+            8,
+            "GET".into(),
+            "/".into(),
+            vec![],
+            target,
+            req_rx,
+            response_tx,
+        );
+        req_tx
+            .send(StreamMessage::Payload(Payload::RequestEnd { stream_id: 8 }))
+            .await
+            .unwrap();
+
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), response_rx.recv())
+            .await
+            .expect("timed out waiting for ResponseError")
+            .expect("channel closed");
+
+        match msg.payload {
+            Payload::ResponseError {
+                code: ResponseErrorCode::LocalIoError,
+                ..
+            } => {}
+            other => panic!("expected ResponseError(LocalIoError), got {:?}", other),
+        }
     }
 }

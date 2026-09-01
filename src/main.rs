@@ -1,3 +1,17 @@
+//! `localshare` — instantly share a local HTTP server with the internet.
+//!
+//! A binary crate that wires together three layers:
+//!
+//! - [`cli`] parses and validates command-line arguments.
+//! - [`tunnel`] runs the relay WebSocket connection, reconnect logic, and the
+//!   local HTTP forwarding engine.
+//! - [`ui`] renders tunnel events for humans (interactive banner + QR + request
+//!   log) or scripts (JSON), and translates fatal errors into exit codes.
+//!
+//! Graceful shutdown is signal-driven: on Unix, `SIGINT` and `SIGTERM` cancel
+//! the tunnel (which flushes `Unregister` to the relay), and the process exits
+//! with code 0 once the WebSocket is fully closed.
+
 use clap::Parser;
 use colored::control::set_override;
 use std::io::IsTerminal;

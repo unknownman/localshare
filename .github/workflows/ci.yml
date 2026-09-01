@@ -34,5 +34,5 @@ jobs:
       - name: Lint (clippy, deny warnings)
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Run tests
-        run: cargo test
+      - name: Run tests (all targets)
+        run: cargo test --all-targets
