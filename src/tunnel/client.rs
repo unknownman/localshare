@@ -61,8 +61,11 @@ pub enum TunnelEvent {
         /// connection refused). `None` for successful requests.
         hint: Option<String>,
     },
-    /// The tunnel was disconnected (either gracefully or due to an error).
-    Disconnected { reason: String },
+    /// The tunnel was disconnected, either because the process is shutting
+    /// down (`graceful: true`), the relay closed the connection cleanly
+    /// (`graceful: true`), or because of a fatal error (`graceful: false`).
+    /// Graceful disconnects exit `0`; fatal ones exit non-zero.
+    Disconnected { reason: String, graceful: bool },
 }
 
 /// Configuration for [`run_tunnel`].
@@ -127,6 +130,7 @@ pub async fn run_tunnel(
         Err(e) => {
             let _ = event_tx.send(TunnelEvent::Disconnected {
                 reason: e.to_string(),
+                graceful: false,
             });
             return event_rx;
         }
@@ -181,14 +185,33 @@ async fn reconnect_loop(
 
                 // A connection that fails before ever succeeding is treated as
                 // fatal: there is no tunnel to repair, so retrying indefinitely
-                // would just spin. Emit a clean Disconnected and stop.
+                // would just spin. Emit a clean Disconnected and stop. Unless a
+                // shutdown has been requested meanwhile (e.g. Ctrl+C during the
+                // handshake), which should always be a graceful exit 0.
+                if cancel.is_cancelled() {
+                    break;
+                }
                 if !ever_connected {
-                    let _ = event_tx.send(TunnelEvent::Disconnected { reason });
+                    let _ = event_tx.send(TunnelEvent::Disconnected {
+                        reason,
+                        graceful: false,
+                    });
+                    break;
+                }
+
+                // The relay closed the connection cleanly (a WebSocket close
+                // frame or an orderly EOF), e.g. during a server restart. That
+                // is a graceful end-of-session: report it and exit 0 rather
+                // than retrying or panicking.
+                if is_graceful_close(&e) {
+                    let _ = event_tx.send(TunnelEvent::Disconnected {
+                        reason: "The relay closed the connection.".into(),
+                        graceful: true,
+                    });
                     break;
                 }
 
                 if cancel.is_cancelled() {
-                    let _ = event_tx.send(TunnelEvent::Disconnected { reason });
                     break;
                 }
 
@@ -217,8 +240,16 @@ async fn reconnect_loop(
     if cancel.is_cancelled() {
         let _ = event_tx.send(TunnelEvent::Disconnected {
             reason: "cancelled".into(),
+            graceful: true,
         });
     }
+}
+
+/// Returns `true` when the error is a clean close from the relay (a WebSocket
+/// close frame or an orderly EOF) rather than a transport-level failure that
+/// warrants a reconnect attempt.
+fn is_graceful_close(e: &RelayError) -> bool {
+    matches!(e, RelayError::UnexpectedClose(_))
 }
 
 // ── Single connection lifecycle ───────────────────────────────────────────────
@@ -303,22 +334,14 @@ async fn connect_once(
     let pong_deadline = std::sync::Arc::new(std::sync::Mutex::new(pong_deadline));
 
     // ── 4. Spawn WebSocket sink writer task ───────────────────────────────────
-    let sink_cancel = cancel.clone();
-    tokio::spawn(async move {
+    // The task runs until every `response_tx` sender is dropped: on shutdown
+    // the session loop enqueues a final `Unregister` frame, and this task must
+    // flush it (and a Close frame) to the relay before the process exits.
+    let sink_handle = tokio::spawn(async move {
         let mut response_rx = response_rx;
-        loop {
-            tokio::select! {
-                _ = sink_cancel.cancelled() => break,
-                msg = response_rx.recv() => {
-                    match msg {
-                        Some(m) => {
-                            if ws_sink.send(m).await.is_err() {
-                                break;
-                            }
-                        }
-                        None => break,
-                    }
-                }
+        while let Some(m) = response_rx.recv().await {
+            if ws_sink.send(m).await.is_err() {
+                break;
             }
         }
         let _ = ws_sink.close().await;
@@ -428,6 +451,13 @@ async fn connect_once(
 
     // Allow up to 2 seconds for in-flight streams to drain.
     tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Drop the last channel sender we own, then wait for the sink to flush the
+    // final `Unregister` and complete its Close handshake. Awaiting the sink
+    // here guarantees the WebSocket is fully closed before the caller lets the
+    // process exit, so the relay never observes a rude TCP reset.
+    drop(response_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), sink_handle).await;
 
     match error {
         Some(e) => Err(e),

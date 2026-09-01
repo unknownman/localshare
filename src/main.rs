@@ -37,21 +37,59 @@ async fn run() -> i32 {
 
     let events = run_tunnel(config, cancel.clone()).await;
 
-    let ctrl_c_cancel = cancel.clone();
-    tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        ctrl_c_cancel.cancel();
-    });
+    // Failures to install signal handlers happen before the UI loop starts;
+    // surface them as a clean, coloured error rather than a panic.
+    if let Err(e) = install_shutdown_listener(cancel.clone()) {
+        print_error(&e);
+        return 1;
+    }
 
-    match run_ui(&cli, events, cancel).await {
+    match run_ui(&cli, events).await {
         Ok(()) => 0,
         Err(e) if e.downcast_ref::<ui::FatalTunnelError>().is_some() => 1,
         Err(e) => {
-            use colored::Colorize;
-            eprintln!("{} {}", "error:".red().bold(), e);
+            print_error(&e);
             1
         }
     }
+}
+
+/// Render an error to stderr with a consistent `error:` prefix.
+fn print_error(e: &dyn std::fmt::Display) {
+    use colored::Colorize;
+    eprintln!("{} {}", "error:".red().bold(), e);
+}
+
+/// Forward OS shutdown signals into the tunnel's cancellation token so the
+/// client can send `Unregister` and exit gracefully.
+///
+/// On Unix, both `SIGINT` (Ctrl+C) and `SIGTERM` (Docker/systemd) trigger a
+/// graceful shutdown. On Windows only `Ctrl+C` is supported by Tokio.
+#[cfg(unix)]
+fn install_shutdown_listener(cancel: CancellationToken) -> std::io::Result<()> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let mut sigterm = signal(SignalKind::terminate())?;
+
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = sigint.recv() => cancel.cancel(),
+            _ = sigterm.recv() => cancel.cancel(),
+        }
+    });
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn install_shutdown_listener(cancel: CancellationToken) -> std::io::Result<()> {
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        cancel.cancel();
+    });
+
+    Ok(())
 }
 
 /// Configure `tracing_subscriber` based on the `-v` verbosity flag.

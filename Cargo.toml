@@ -46,3 +46,7 @@ colored = "2"
 tokio-test = "0.4"
 assert_cmd = "2"
 predicates = "3"
+
+[target.'cfg(unix)'.dev-dependencies]
+# Send SIGINT/SIGTERM to the spawned binary in integration tests.
+libc = "0.2"

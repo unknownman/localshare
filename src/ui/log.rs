@@ -304,4 +304,59 @@ mod tests {
         let line = entry.format_line(10);
         assert!(line.contains('…'));
     }
+
+    #[test]
+    fn request_log_line_truncates_very_long_path_without_wrapping() {
+        // A 200+ character path must be truncated to fit the configured width,
+        // terminated with an ellipsis, and rendered as a single line so it can
+        // never wrap and break the terminal layout.
+        let long_path = format!("/{}", "segment/".repeat(30)); // 240 chars
+        assert!(long_path.chars().count() > 200);
+
+        let entry = RequestLogEntry {
+            time: "18:42:01".into(),
+            method: "GET".into(),
+            path: long_path.clone(),
+            status: 200,
+            duration: std::time::Duration::from_millis(4),
+            hint: None,
+        };
+
+        let width = 24;
+        let line = entry.format_line(width);
+
+        assert!(
+            !line.contains('\n'),
+            "formatted line must be a single line, got: {line:?}"
+        );
+        assert!(
+            line.contains('…'),
+            "path must be truncated with an ellipsis"
+        );
+
+        // The visible path component should stay within the requested width.
+        let visible = line
+            .split("  ")
+            .find(|part| part.contains(&long_path[..8]) || part.contains('…'))
+            .expect("path column present");
+        assert!(
+            visible.chars().count() <= width,
+            "path column {} exceeds configured width {width}",
+            visible
+        );
+    }
+
+    #[test]
+    fn request_log_line_never_wraps_for_wide_paths() {
+        let long_path = format!("/{}", "a".repeat(250));
+        let entry = RequestLogEntry {
+            time: "18:42:01".into(),
+            method: "POST".into(),
+            path: long_path,
+            status: 404,
+            duration: std::time::Duration::from_millis(4),
+            hint: None,
+        };
+        assert!(!entry.format_line(40).contains('\n'));
+    }
 }

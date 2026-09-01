@@ -10,7 +10,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::accept_async;
 
 // ── Minimal on-the-wire protocol types ─────────────────────────────────────────
@@ -279,6 +279,130 @@ fn kill_and_drain(mut child: Child) -> String {
     out
 }
 
+/// Poll `try_wait` until the child exits or `timeout` elapses. Returns the
+/// process exit code, or `None` if it never exited in time.
+async fn wait_for_exit(child: &mut Child, timeout: Duration) -> Option<i32> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait().expect("try_wait on child") {
+            return status.code();
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+// ── Shutdown (signal) test plumbing ────────────────────────────────────────────
+
+/// Events reported back from the mock relay used by the signal-shutdown tests.
+#[derive(Debug)]
+enum ShutdownRelayEvent {
+    /// The client completed the registration handshake.
+    Registered,
+    /// The client sent `Unregister` after receiving a shutdown signal.
+    UnregisterReceived,
+}
+
+/// Spawn a mock relay that completes the registration handshake, then waits to
+/// observe the client's graceful `Unregister` message.
+async fn spawn_shutdown_relay() -> (u16, mpsc::UnboundedReceiver<ShutdownRelayEvent>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind relay");
+    let port = listener.local_addr().expect("relay addr").port();
+    let (tx, rx) = mpsc::unbounded_channel();
+
+    tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.expect("accept client");
+        let mut ws = accept_async(tcp).await.expect("ws handshake");
+
+        let first = ws
+            .next()
+            .await
+            .expect("client should send Register")
+            .expect("frame ok");
+        let msg = Message::from_ws(&first).expect("first frame should parse");
+        assert!(matches!(msg.payload, Payload::Register { .. }));
+
+        ws.send(
+            Message::new(Payload::Registered {
+                subdomain: "e2e-shutdown".into(),
+                public_url: "https://e2e-shutdown.localshare.dev".into(),
+                heartbeat_interval_ms: 60_000,
+            })
+            .to_binary(),
+        )
+        .await
+        .expect("send Registered");
+
+        let _ = tx.send(ShutdownRelayEvent::Registered);
+
+        // Wait (up to 15s) for the client to send Unregister after the signal.
+        let deadline = Duration::from_secs(15);
+        let got_unregister = tokio::time::timeout(deadline, async {
+            loop {
+                let frame = ws
+                    .next()
+                    .await
+                    .expect("ws closed before Unregister arrived")
+                    .expect("websocket error");
+                if let Some(msg) = Message::from_ws(&frame) {
+                    if matches!(msg.payload, Payload::Unregister { .. }) {
+                        break;
+                    }
+                }
+            }
+        })
+        .await;
+
+        assert!(
+            got_unregister.is_ok(),
+            "client never sent Unregister after shutdown signal"
+        );
+        let _ = tx.send(ShutdownRelayEvent::UnregisterReceived);
+    });
+
+    (port, rx)
+}
+
+#[cfg(unix)]
+async fn assert_graceful_shutdown(signal: i32) {
+    let (relay_port, mut events) = spawn_shutdown_relay().await;
+    let mut child = spawn_child(relay_port, 3000);
+
+    // Wait until the client has registered with the relay.
+    let registered = tokio::time::timeout(Duration::from_secs(10), events.recv())
+        .await
+        .expect("client never registered before signal")
+        .expect("relay event channel closed early");
+    assert!(
+        matches!(registered, ShutdownRelayEvent::Registered),
+        "expected Registered, got {registered:?}"
+    );
+
+    // Give the client a beat to spin up its session loop, then signal it.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // SAFETY: `child.id()` is a valid live PID we spawned ourselves.
+    unsafe {
+        libc::kill(child.id() as i32, signal);
+    }
+
+    // The relay must observe the graceful Unregister.
+    let unregister = tokio::time::timeout(Duration::from_secs(15), events.recv())
+        .await
+        .expect("relay never received Unregister after signal")
+        .expect("relay event channel closed early");
+    assert!(
+        matches!(unregister, ShutdownRelayEvent::UnregisterReceived),
+        "expected UnregisterReceived, got {unregister:?}"
+    );
+
+    // The process must exit cleanly with code 0 (not 130 or a fatal error).
+    let code = wait_for_exit(&mut child, Duration::from_secs(15)).await;
+    assert_eq!(code, Some(0), "graceful shutdown must exit with code 0");
+    let _ = child.wait();
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -354,4 +478,16 @@ async fn e2e_local_connection_refused_reports_502_with_hint() {
         stdout.contains("Is your local server running on 127.0.0.1:"),
         "expected actionable hint in JSON"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn e2e_sigint_gracefully_unregisters_and_exits_zero() {
+    assert_graceful_shutdown(libc::SIGINT).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn e2e_sigterm_gracefully_unregisters_and_exits_zero() {
+    assert_graceful_shutdown(libc::SIGTERM).await;
 }
