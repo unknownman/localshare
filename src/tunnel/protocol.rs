@@ -21,9 +21,16 @@ impl Message {
     }
 
     /// Serialize this message into a WebSocket binary frame.
+    ///
+    /// `Message` only contains strings, numbers, byte arrays, and plain
+    /// enums, so serialization is effectively infallible. Rather than panic
+    /// (`expect` is banned in production code), the impossible error branch
+    /// emits an unparseable frame that the peer will safely skip.
     pub fn into_ws_message(self) -> tungstenite::Message {
-        let v = serde_json::to_vec(&self).expect("Message serialization is infallible");
-        tungstenite::Message::Binary(v)
+        match serde_json::to_vec(&self) {
+            Ok(v) => tungstenite::Message::Binary(v),
+            Err(_) => tungstenite::Message::Text("{}".to_string()),
+        }
     }
 
     /// Deserialize a `Message` from a text or binary WebSocket frame.

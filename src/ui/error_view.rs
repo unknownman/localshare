@@ -17,6 +17,20 @@ impl<'a> ErrorView<'a> {
             hint: None,
         }
     }
+
+    pub fn with_hint(
+        title: &'a str,
+        detail: &'a str,
+        message: impl fmt::Display,
+        hint: impl Into<String>,
+    ) -> Self {
+        Self {
+            title,
+            detail,
+            message: message.to_string(),
+            hint: Some(hint.into()),
+        }
+    }
 }
 
 impl<'a> fmt::Display for ErrorView<'a> {
@@ -62,5 +76,17 @@ mod tests {
         let view = ErrorView::new("Connection failed", "", "no route to host");
         let text = view.to_string();
         assert!(!text.contains("→"));
+    }
+
+    #[test]
+    fn hint_rendered_when_provided() {
+        let view = ErrorView::with_hint(
+            "Registration rejected",
+            "",
+            "registration rejected by relay: SubdomainTaken",
+            "Try a different subdomain with -s <name>.",
+        );
+        let text = view.to_string();
+        assert!(text.contains("→ Try a different subdomain with"));
     }
 }

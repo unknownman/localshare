@@ -117,6 +117,7 @@ pub struct RequestLogEntry {
     pub path: String,
     pub status: u16,
     pub duration: std::time::Duration,
+    pub hint: Option<String>,
 }
 
 impl RequestLogEntry {
@@ -127,6 +128,7 @@ impl RequestLogEntry {
                 path,
                 status,
                 duration,
+                hint,
                 ..
             } => {
                 let time = format_time(*duration);
@@ -136,10 +138,21 @@ impl RequestLogEntry {
                     path: path.clone(),
                     status: *status,
                     duration: *duration,
+                    hint: hint.clone(),
                 })
             }
             _ => None,
         }
+    }
+
+    /// Returns a distinct, user-facing warning string when the request failed
+    /// in a way that carries an actionable hint (e.g. local server not running).
+    pub fn format_hint(&self) -> Option<String> {
+        let reset = "\x1b[0m";
+        let yellow = "\x1b[33m";
+        self.hint
+            .as_ref()
+            .map(|h| format!("{yellow}  ⚠ {}{reset}", h))
     }
 
     pub fn format_line(&self, path_width: usize) -> String {
@@ -242,12 +255,40 @@ mod tests {
             path: "/api/v1/health".into(),
             status: 200,
             duration: std::time::Duration::from_millis(4),
+            hint: None,
         };
         let line = entry.format_line(20);
         assert!(line.contains("GET"));
         assert!(line.contains("/api/v1/health"));
         assert!(line.contains("200"));
         assert!(line.contains("4ms"));
+    }
+
+    #[test]
+    fn request_log_hint_when_present() {
+        let entry = RequestLogEntry {
+            time: "18:42:01".into(),
+            method: "GET".into(),
+            path: "/".into(),
+            status: 502,
+            duration: std::time::Duration::from_millis(4),
+            hint: Some("Is your local server running on 127.0.0.1:3000?".into()),
+        };
+        let hint = entry.format_hint().expect("hint should be rendered");
+        assert!(hint.contains("Is your local server running on 127.0.0.1:3000?"));
+    }
+
+    #[test]
+    fn request_log_no_hint_when_absent() {
+        let entry = RequestLogEntry {
+            time: "18:42:01".into(),
+            method: "GET".into(),
+            path: "/".into(),
+            status: 200,
+            duration: std::time::Duration::from_millis(4),
+            hint: None,
+        };
+        assert!(entry.format_hint().is_none());
     }
 
     #[test]
@@ -258,6 +299,7 @@ mod tests {
             path: "/this/is/a/very/long/path/that/should/be/truncated".into(),
             status: 200,
             duration: std::time::Duration::from_millis(4),
+            hint: None,
         };
         let line = entry.format_line(10);
         assert!(line.contains('…'));

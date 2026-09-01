@@ -89,11 +89,12 @@ fn version_flag_succeeds() {
 fn json_mode_with_unreachable_relay_emits_valid_json() {
     // Point at an unreachable relay to force a quick, deterministic exit:
     // DNS fails instantly, so the reconnect loop emits a fatal Disconnected.
+    // A fatal tunnel error must exit non-zero (1) so scripts can detect it.
     let out = localshare()
         .args(["3000", "--json", "-r", "ws://127.0.0.1:1"])
         .timeout(std::time::Duration::from_secs(15))
         .assert()
-        .code(0)
+        .code(1)
         .get_output()
         .stdout
         .clone();
@@ -108,4 +109,96 @@ fn json_mode_with_unreachable_relay_emits_valid_json() {
     let parsed: serde_json::Value =
         serde_json::from_str(first_line).expect("first line should parse as JSON");
     assert_eq!(parsed["event"], "connecting");
+}
+
+// ── Piped output (non-TTY) ─────────────────────────────────────────────────────
+
+// assert_cmd runs the child with pipes, so stdout is never a TTY here. The tool
+// must not emit ANSI escape sequences when it cannot detect a terminal; doing so
+// would corrupt scripts and CI logs.
+
+#[test]
+fn no_ansi_escapes_when_stdout_is_piped() {
+    let out = localshare()
+        .args(["3000", "-r", "ws://127.0.0.1:1", "--quiet"])
+        .timeout(std::time::Duration::from_secs(15))
+        .assert()
+        .code(1) // fatal disconnect while nothing listens on 127.0.0.1:1
+        .get_output()
+        .stdout
+        .clone();
+
+    assert!(
+        !out.contains(&0x1b),
+        "unexpected ANSI escape in piped stdout: {:?}",
+        String::from_utf8_lossy(&out)
+    );
+    // The trailing reason line goes to stderr and should also be plain.
+    let err = localshare()
+        .args(["3000", "-r", "ws://127.0.0.1:1", "--quiet"])
+        .timeout(std::time::Duration::from_secs(15))
+        .assert()
+        .code(1)
+        .get_output()
+        .stderr
+        .clone();
+    assert!(
+        !err.contains(&0x1b),
+        "unexpected ANSI escape in piped stderr: {:?}",
+        String::from_utf8_lossy(&err)
+    );
+}
+
+#[test]
+fn fatal_disconnect_reports_actionable_hint_on_stderr() {
+    localshare()
+        .args(["3000", "-r", "ws://127.0.0.1:1"])
+        .timeout(std::time::Duration::from_secs(15))
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("Could not reach relay"))
+        .stderr(predicate::str::contains("→ Check the relay address"));
+}
+
+// ── Subdomain validation ───────────────────────────────────────────────────────
+
+#[test]
+fn invalid_subdomain_is_rejected_by_parser() {
+    // All of these must fail during argument parsing (exit code 2) and never
+    // reach the network layer. Note: `-leading` is additionally intercepted by
+    // Clap itself as an unknown flag, hence the "unexpected argument" branch.
+    for bad in [
+        "test_underscore".to_string(),
+        "-leading".to_string(),
+        "trailing-".to_string(),
+        "has space".to_string(),
+        String::new(),
+        "a".repeat(64),
+    ] {
+        localshare()
+            .args(["3000", "-s", &bad])
+            .assert()
+            .code(2)
+            .stderr(
+                predicate::str::contains("subdomain")
+                    .or(predicate::str::contains("unexpected argument")),
+            );
+    }
+}
+
+#[test]
+fn unreachable_relay_stderr_has_no_ansi_in_json_mode() {
+    let err = localshare()
+        .args(["3000", "--json", "-r", "ws://127.0.0.1:1"])
+        .timeout(std::time::Duration::from_secs(15))
+        .assert()
+        .code(1)
+        .get_output()
+        .stderr
+        .clone();
+    assert!(
+        !err.contains(&0x1b),
+        "unexpected ANSI escape in piped stderr for JSON mode: {:?}",
+        String::from_utf8_lossy(&err)
+    );
 }

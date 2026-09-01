@@ -57,6 +57,9 @@ pub enum TunnelEvent {
         path: String,
         status: u16,
         duration: Duration,
+        /// Optional user-facing hint when the request failed (e.g. a local
+        /// connection refused). `None` for successful requests.
+        hint: Option<String>,
     },
     /// The tunnel was disconnected (either gracefully or due to an error).
     Disconnected { reason: String },
@@ -340,7 +343,9 @@ async fn connect_once(
                         break;
                     }
                     // Check if pong deadline has been missed.
-                    let deadline = *heartbeat_pong_deadline.lock().unwrap();
+                    let deadline = *heartbeat_pong_deadline
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
                     if tokio::time::Instant::now() > deadline + pong_timeout {
                         tracing::warn!("relay pong not received within deadline; treating as dead");
                         heartbeat_cancel.cancel();
@@ -381,7 +386,9 @@ async fn connect_once(
                 ) {
                     // Update pong deadline on any Pong frame.
                     if matches!(frame, tungstenite::Message::Pong(_)) {
-                        let mut dl = pong_deadline.lock().unwrap();
+                        let mut dl = pong_deadline
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner());
                         *dl = tokio::time::Instant::now() + config.pong_timeout;
                     }
                     continue;
@@ -458,8 +465,11 @@ async fn dispatch_message(
             let start = std::time::Instant::now();
             let method_clone = method.clone();
             let path_clone = path.clone();
+            let target_host = target.host.clone();
+            let target_port = target.port;
             tokio::spawn(async move {
                 let mut captured_status: Option<u16> = None;
+                let mut hint: Option<String> = None;
                 let mut emitted = false;
                 while let Some(m) = msg_rx.recv().await {
                     match &m.payload {
@@ -473,6 +483,14 @@ async fn dispatch_message(
                                 crate::tunnel::protocol::ResponseErrorCode::LocalIoError => 502,
                             };
                             captured_status = Some(status);
+                            if *code
+                                == crate::tunnel::protocol::ResponseErrorCode::TargetConnectionRefused
+                            {
+                                hint = Some(format!(
+                                    "Is your local server running on {}:{}?",
+                                    target_host, target_port
+                                ));
+                            }
                             if !emitted {
                                 emitted = true;
                                 let _ = event_tx_clone.send(TunnelEvent::RequestHandled {
@@ -481,6 +499,7 @@ async fn dispatch_message(
                                     path: path_clone.clone(),
                                     status,
                                     duration: start.elapsed(),
+                                    hint: hint.clone(),
                                 });
                             }
                         }
@@ -493,6 +512,7 @@ async fn dispatch_message(
                                 path: path_clone.clone(),
                                 status,
                                 duration: start.elapsed(),
+                                hint: hint.clone(),
                             });
                         }
                         _ => {}
@@ -543,7 +563,7 @@ async fn dispatch_message(
 
         // ── Heartbeat response ────────────────────────────────────────────────
         Payload::RelayPong => {
-            let mut dl = pong_deadline.lock().unwrap();
+            let mut dl = pong_deadline.lock().unwrap_or_else(|p| p.into_inner());
             *dl = tokio::time::Instant::now() + pong_timeout;
         }
 

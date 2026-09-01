@@ -15,8 +15,20 @@ impl fmt::Display for TerminalQr {
     }
 }
 
+/// Render a URL as a terminal QR code. Returns a banner-shaped `TerminalQr`
+/// even if the URL cannot be encoded, so callers never have to handle a panic.
 pub fn render_qr(text: &str) -> TerminalQr {
-    let code = QrCode::new(text).expect("valid QR data");
+    // `QrCode::new` only fails when the content exceeds the maximum capacity
+    // of the largest QR version; public URLs are far below that, but guard
+    // anyway instead of panicking on user-supplied data.
+    let code = match QrCode::new(text) {
+        Ok(code) => code,
+        Err(_) => {
+            return TerminalQr {
+                lines: vec![format!("QR unavailable for: {}", text)],
+            }
+        }
+    };
     let colors = code.to_colors();
     let qr_size = code.width();
 
