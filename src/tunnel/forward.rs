@@ -61,7 +61,6 @@ pub fn process_stream(
                         LocalForwardError::TargetConnectionRefused(_) => {
                             ResponseErrorCode::TargetConnectionRefused
                         }
-                        LocalForwardError::Timeout(_) => ResponseErrorCode::TargetTimeout,
                         _ => ResponseErrorCode::LocalIoError,
                     },
                     message: e.to_string(),

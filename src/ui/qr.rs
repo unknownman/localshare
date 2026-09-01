@@ -1,26 +1,9 @@
 use qrcode::QrCode;
 use std::fmt;
 
-#[derive(Debug, Clone, Copy)]
-pub enum QrColor {
-    Black,
-    White,
-}
-
-impl QrColor {
-    pub fn as_char(self) -> char {
-        match self {
-            Self::Black => '█',
-            Self::White => ' ',
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct TerminalQr {
     pub lines: Vec<String>,
-    pub width: usize,
-    pub height: usize,
 }
 
 impl fmt::Display for TerminalQr {
@@ -41,7 +24,7 @@ pub fn render_qr(text: &str) -> TerminalQr {
     let total_width = qr_size + quiet * 2;
     let total_height = qr_size + quiet * 2;
 
-    let mut lines = Vec::with_capacity((total_height + 1) / 2);
+    let mut lines = Vec::with_capacity(total_height.div_ceil(2));
 
     for row in (0..total_height).step_by(2) {
         let mut line = String::with_capacity(total_width);
@@ -67,11 +50,7 @@ pub fn render_qr(text: &str) -> TerminalQr {
         lines.push(line);
     }
 
-    TerminalQr {
-        lines,
-        width: total_width,
-        height: total_height,
-    }
+    TerminalQr { lines }
 }
 
 fn qr_module_dark(colors: &[qrcode::Color], qr_size: usize, row: usize, col: usize) -> bool {
@@ -89,10 +68,10 @@ mod tests {
     #[test]
     fn renders_known_data_with_quiet_zone() {
         let qr = render_qr("https://example.com");
-        assert!(qr.width >= 21 + 4);
-        assert!(qr.height >= 21 + 4);
-        assert_eq!(qr.lines.len(), (qr.height + 1) / 2);
-        assert!(qr.lines.iter().all(|line| line.chars().count() == qr.width));
+        let width = qr.lines.iter().map(|l| l.chars().count()).max().unwrap();
+        assert!(width >= 21 + 4);
+        assert!(qr.lines.iter().all(|line| line.chars().count() == width));
+        assert!((qr.lines.len() * 2) >= 21 + 4);
     }
 
     #[test]
@@ -106,6 +85,6 @@ mod tests {
     #[test]
     fn empty_content_still_renders() {
         let qr = render_qr("");
-        assert_eq!(qr.lines.len(), (qr.height + 1) / 2);
+        assert!(!qr.lines.is_empty());
     }
 }

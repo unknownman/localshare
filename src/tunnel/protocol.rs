@@ -191,11 +191,6 @@ impl RelayEndpoint {
     pub fn ws_url(&self) -> String {
         format!("{}://{}:{}{}", self.scheme, self.host, self.port, self.path)
     }
-
-    /// Returns `true` when TLS should be used (scheme is `wss`).
-    pub fn is_tls(&self) -> bool {
-        self.scheme == "wss"
-    }
 }
 
 impl std::fmt::Display for RelayEndpoint {
@@ -465,7 +460,6 @@ mod tests {
         let ep = parse_relay("wss://secure.relay.io").unwrap();
         assert_eq!(ep.scheme, "wss");
         assert_eq!(ep.port, 443);
-        assert!(ep.is_tls());
     }
 
     #[test]

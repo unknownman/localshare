@@ -143,6 +143,7 @@ async fn reconnect_loop(
 ) {
     let mut attempt: u32 = 0;
     let mut last_subdomain: Option<String> = config.requested_subdomain.clone();
+    let mut ever_connected = false;
 
     loop {
         if cancel.is_cancelled() {
@@ -164,6 +165,7 @@ async fn reconnect_loop(
         {
             Ok(assigned) => {
                 // Successful session ended (graceful or cancelled).
+                ever_connected = true;
                 last_subdomain = Some(assigned);
                 attempt = 0;
                 if cancel.is_cancelled() {
@@ -173,6 +175,14 @@ async fn reconnect_loop(
             Err(e) => {
                 let reason = e.to_string();
                 tracing::warn!(attempt, error = %reason, "relay connection lost");
+
+                // A connection that fails before ever succeeding is treated as
+                // fatal: there is no tunnel to repair, so retrying indefinitely
+                // would just spin. Emit a clean Disconnected and stop.
+                if !ever_connected {
+                    let _ = event_tx.send(TunnelEvent::Disconnected { reason });
+                    break;
+                }
 
                 if cancel.is_cancelled() {
                     let _ = event_tx.send(TunnelEvent::Disconnected { reason });
@@ -201,9 +211,11 @@ async fn reconnect_loop(
         }
     }
 
-    let _ = event_tx.send(TunnelEvent::Disconnected {
-        reason: "cancelled".into(),
-    });
+    if cancel.is_cancelled() {
+        let _ = event_tx.send(TunnelEvent::Disconnected {
+            reason: "cancelled".into(),
+        });
+    }
 }
 
 // ── Single connection lifecycle ───────────────────────────────────────────────
@@ -472,18 +484,16 @@ async fn dispatch_message(
                                 });
                             }
                         }
-                        Payload::ResponseEnd { .. } => {
-                            if !emitted {
-                                emitted = true;
-                                let status = captured_status.unwrap_or(200);
-                                let _ = event_tx_clone.send(TunnelEvent::RequestHandled {
-                                    stream_id,
-                                    method: method_clone.clone(),
-                                    path: path_clone.clone(),
-                                    status,
-                                    duration: start.elapsed(),
-                                });
-                            }
+                        Payload::ResponseEnd { .. } if !emitted => {
+                            emitted = true;
+                            let status = captured_status.unwrap_or(200);
+                            let _ = event_tx_clone.send(TunnelEvent::RequestHandled {
+                                stream_id,
+                                method: method_clone.clone(),
+                                path: path_clone.clone(),
+                                status,
+                                duration: start.elapsed(),
+                            });
                         }
                         _ => {}
                     }
@@ -548,7 +558,7 @@ async fn dispatch_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tunnel::protocol::{Header, Message, Payload, RejectReason, PROTOCOL_VERSION};
+    use crate::tunnel::protocol::{Message, Payload, RejectReason};
     use futures_util::{SinkExt, StreamExt};
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
@@ -630,7 +640,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registration_rejection_triggers_reconnect() {
+    async fn registration_rejection_emits_disconnected() {
         let port = spawn_mock_relay(Payload::RegisterRejected {
             reason: RejectReason::SubdomainTaken,
         })
@@ -652,11 +662,12 @@ mod tests {
 
         let mut rx = run_tunnel(config, cancel.clone()).await;
 
-        // We expect a Reconnecting event (rejection causes reconnect with backoff).
-        let got_reconnecting = tokio::time::timeout(Duration::from_secs(5), async {
+        // A rejected registration before any successful connection is fatal:
+        // we expect a Disconnected event signalling a graceful stop.
+        let got_disconnected = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 match rx.recv().await {
-                    Ok(TunnelEvent::Reconnecting { .. }) => return true,
+                    Ok(TunnelEvent::Disconnected { .. }) => return true,
                     Ok(_) => continue,
                     Err(_) => return false,
                 }
@@ -666,8 +677,8 @@ mod tests {
         .expect("timed out");
 
         assert!(
-            got_reconnecting,
-            "expected Reconnecting event after rejection"
+            got_disconnected,
+            "expected Disconnected event after rejection"
         );
         cancel.cancel();
     }

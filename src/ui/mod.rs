@@ -67,9 +67,10 @@ async fn run_json_mode(
                             "endpoint": endpoint,
                         }));
                     }
-                    Ok(TunnelEvent::RequestHandled { method, path, status, duration, .. }) => {
+                    Ok(TunnelEvent::RequestHandled { stream_id, method, path, status, duration }) => {
                         println!("{}", serde_json::json!({
                             "event": "request_handled",
+                            "stream_id": stream_id,
                             "method": method,
                             "path": path,
                             "status": status,
@@ -133,21 +134,24 @@ async fn run_interactive_mode(
                         eprintln!("\nPress Ctrl+C to stop sharing.\n");
                         eprintln!("Recent Requests:");
                     }
-                    Ok(TunnelEvent::RequestHandled { method, path, status, duration, .. }) => {
-                        let entry = log::RequestLogEntry {
-                            time: log::format_time(duration),
-                            method,
-                            path,
-                            status,
-                            duration,
-                        };
-                        println!("{}", entry.format_line(24));
-                        let _ = io::stdout().flush();
+                    Ok(TunnelEvent::Connecting { endpoint }) if !banner_printed => {
+                        let (label, color) = banner::ConnectionStatus::Connecting.as_label();
+                        eprintln!("  \x1b[1m{}{}\x1b[0m ({})", color, label, endpoint);
                     }
-                    Ok(TunnelEvent::Disconnected { reason }) => {
-                        if !reason.is_empty() {
-                            eprintln!("Disconnected: {}", reason);
+                    Ok(TunnelEvent::Reconnecting { attempt, delay }) => {
+                        let (label, color) = banner::ConnectionStatus::Reconnecting { attempt }.as_label();
+                        eprintln!("  \x1b[1m{}{}\x1b[0m in {}ms", color, label, delay.as_millis());
+                    }
+                    Ok(event @ TunnelEvent::RequestHandled { .. }) => {
+                        if let Some(entry) = log::RequestLogEntry::from_event(&event) {
+                            println!("{}", entry.format_line(24));
+                            let _ = io::stdout().flush();
                         }
+                    }
+                    Ok(TunnelEvent::Disconnected { reason }) if !reason.is_empty() && reason != "cancelled" => {
+                        let view = error_view::ErrorView::new("Tunnel disconnected", "", &reason);
+                        eprintln!("{}", view);
+                        break;
                     }
                     _ => {}
                 }
