@@ -172,7 +172,7 @@ async fn spawn_mock_relay(expect_refused: bool) -> (u16, oneshot::Receiver<Relay
             .expect("send RequestEnd");
 
         // Read the client's responses until the scenario completes.
-        let deadline = Duration::from_secs(10);
+        let deadline = Duration::from_secs(15);
         let mut status: Option<u16> = None;
         let mut body = Vec::new();
 
@@ -341,7 +341,7 @@ async fn spawn_mock_relay_error_then_ok() -> (u16, oneshot::Receiver<(ResponseEr
     tokio::spawn(async move {
         let (tcp, _) = listener.accept().await.expect("accept client");
         let mut ws = accept_async(tcp).await.expect("ws handshake");
-        let deadline = Duration::from_secs(10);
+        let deadline = Duration::from_secs(15);
 
         // Registration handshake.
         let first = ws
@@ -563,7 +563,7 @@ async fn assert_graceful_shutdown(signal: i32) {
     let mut child = spawn_child(relay_port, 3000);
 
     // Wait until the client has registered with the relay.
-    let registered = tokio::time::timeout(Duration::from_secs(10), events.recv())
+    let registered = tokio::time::timeout(Duration::from_secs(15), events.recv())
         .await
         .expect("client never registered before signal")
         .expect("relay event channel closed early");

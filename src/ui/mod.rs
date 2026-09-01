@@ -234,15 +234,14 @@ async fn run_interactive_mode(
                 eprintln!("Recent Requests:");
             }
             Ok(TunnelEvent::Connecting { endpoint }) if !banner_printed => {
-                let (label, color) = banner::ConnectionStatus::Connecting.as_label();
-                eprintln!("  \x1b[1m{}{}\x1b[0m ({})", color, label, endpoint);
+                let status = banner::ConnectionStatus::Connecting;
+                eprintln!("  {} ({})", banner::styled_label(status), endpoint);
             }
             Ok(TunnelEvent::Reconnecting { attempt, delay }) => {
-                let (label, color) = banner::ConnectionStatus::Reconnecting { attempt }.as_label();
+                let status = banner::ConnectionStatus::Reconnecting { attempt };
                 eprintln!(
-                    "  \x1b[1m{}{}\x1b[0m in {}ms",
-                    color,
-                    label,
+                    "  {} in {}ms",
+                    banner::styled_label(status),
                     delay.as_millis()
                 );
             }

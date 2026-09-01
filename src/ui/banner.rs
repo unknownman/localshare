@@ -1,3 +1,5 @@
+use colored::Colorize;
+
 use crate::tunnel::client::TunnelSession;
 
 #[derive(Debug, Clone, Copy)]
@@ -8,16 +10,33 @@ pub enum ConnectionStatus {
 }
 
 impl ConnectionStatus {
-    pub fn as_label(self) -> (&'static str, &'static str) {
+    /// Plain (unstyled) human-readable label.
+    pub fn label(self) -> String {
         match self {
-            Self::Live => ("● LIVE", "\x1b[32m"),
-            Self::Connecting => ("◌ CONNECTING...", "\x1b[36m"),
-            Self::Reconnecting { attempt } => {
-                let label = format!("▲ RECONNECTING (Attempt {})...", attempt);
-                (Box::leak(label.into_boxed_str()), "\x1b[33m")
-            }
+            Self::Live => "● LIVE".to_string(),
+            Self::Connecting => "◌ CONNECTING...".to_string(),
+            Self::Reconnecting { attempt } => format!("▲ RECONNECTING (Attempt {attempt})..."),
         }
     }
+
+    /// Accent colour for the label; `None` keeps the default foreground.
+    pub fn color(self) -> Option<colored::Color> {
+        match self {
+            Self::Live => Some(colored::Color::Green),
+            Self::Connecting => Some(colored::Color::Cyan),
+            Self::Reconnecting { .. } => Some(colored::Color::Yellow),
+        }
+    }
+}
+
+/// Renders a status label in bold + its accent colour. Styling is driven by
+/// `colored`'s global override, so `NO_COLOR` and piped output drop the escapes.
+pub fn styled_label(status: ConnectionStatus) -> colored::ColoredString {
+    let mut label = status.label().bold();
+    if let Some(color) = status.color() {
+        label = label.color(color);
+    }
+    label
 }
 
 #[derive(Debug, Clone)]
@@ -55,13 +74,15 @@ impl<'a> std::fmt::Display for Banner<'a> {
         );
         writeln!(f, "{}", header)?;
 
-        let (status_text, status_color) = self.status.as_label();
-        let _reset = "\x1b[0m";
-        let bold = "\x1b[1m";
-
         let content = format!(
-            "\x1b[1;36mPublic URL :\x1b[0m  {}\n\x1b[1;37mForwarding :\x1b[0m  {}\n\x1b[1;37mStatus     :\x1b[0m  {}{}{}  ({})",
-            self.public_url, self.forwarding, status_color, bold, status_text, self.relay
+            "{}  {}\n{}  {}\n{}  {}  ({})",
+            "Public URL :".cyan().bold(),
+            self.public_url,
+            "Forwarding :".white().bold(),
+            self.forwarding,
+            "Status     :".white().bold(),
+            styled_label(self.status),
+            self.relay
         );
 
         let lines: Vec<&str> = content.lines().collect();

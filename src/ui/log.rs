@@ -22,13 +22,13 @@ impl MethodColor {
         }
     }
 
-    pub fn ansi(self) -> &'static str {
+    pub fn color(self) -> colored::Color {
         match self {
-            Self::Get => "\x1b[36m",
-            Self::Post => "\x1b[32m",
-            Self::Put | Self::Patch => "\x1b[33m",
-            Self::Delete => "\x1b[31m",
-            Self::Other => "\x1b[37m",
+            Self::Get => colored::Color::Cyan,
+            Self::Post => colored::Color::Green,
+            Self::Put | Self::Patch => colored::Color::Yellow,
+            Self::Delete => colored::Color::Red,
+            Self::Other => colored::Color::White,
         }
     }
 }
@@ -74,13 +74,13 @@ impl StatusInfo {
         }
     }
 
-    pub fn ansi(self) -> &'static str {
+    pub fn color(self) -> colored::Color {
         match self.code {
-            200..=299 => "\x1b[32m",
-            300..=399 => "\x1b[36m",
-            400..=499 => "\x1b[33m",
-            500..=599 => "\x1b[31m",
-            _ => "\x1b[37m",
+            200..=299 => colored::Color::Green,
+            300..=399 => colored::Color::Cyan,
+            400..=499 => colored::Color::Yellow,
+            500..=599 => colored::Color::Red,
+            _ => colored::Color::White,
         }
     }
 }
@@ -89,14 +89,14 @@ impl StatusInfo {
 pub struct LatencyInfo(pub std::time::Duration);
 
 impl LatencyInfo {
-    pub fn ansi(self) -> &'static str {
+    pub fn color(self) -> colored::Color {
         let ms = self.0.as_millis();
         if ms < 100 {
-            "\x1b[32m"
+            colored::Color::Green
         } else if ms <= 500 {
-            "\x1b[33m"
+            colored::Color::Yellow
         } else {
-            "\x1b[31m"
+            colored::Color::Red
         }
     }
 
@@ -148,19 +148,23 @@ impl RequestLogEntry {
     /// Returns a distinct, user-facing warning string when the request failed
     /// in a way that carries an actionable hint (e.g. local server not running).
     pub fn format_hint(&self) -> Option<String> {
-        let reset = "\x1b[0m";
-        let yellow = "\x1b[33m";
+        use colored::Colorize;
         self.hint
             .as_ref()
-            .map(|h| format!("{yellow}  ⚠ {}{reset}", h))
+            .map(|h| format!("  ⚠ {h}").color(colored::Color::Yellow).to_string())
     }
 
     pub fn format_line(&self, path_width: usize) -> String {
-        let method_color = MethodColor::from_method(&self.method).ansi();
+        use colored::Colorize;
+
+        let method_color = MethodColor::from_method(&self.method);
         let status = StatusInfo::from_code(self.status);
-        let latency_color = LatencyInfo(self.duration).ansi();
-        let reset = "\x1b[0m";
-        let dim = "\x1b[2m";
+        let latency = LatencyInfo(self.duration);
+
+        let time = self.time.clone().dimmed();
+        let method = self.method.clone().color(method_color.color());
+        let status = status.label().color(status.color());
+        let latency = latency.label().color(latency.color());
 
         let path = if self.path.chars().count() > path_width {
             let mut truncated = self
@@ -175,21 +179,8 @@ impl RequestLogEntry {
         };
 
         format!(
-            "{}{}{}  {}{:5}{}  {:<width$}  {}{}{}  {}{}{}",
-            dim,
-            self.time,
-            reset,
-            method_color,
-            self.method,
-            reset,
-            path,
-            status.ansi(),
-            status.label(),
-            reset,
-            latency_color,
-            LatencyInfo(self.duration).label(),
-            reset,
-            width = path_width
+            "{time}  {method:>5}  {path:<path_width$}  {status}  {latency}",
+            path_width = path_width
         )
     }
 }
@@ -214,37 +205,37 @@ mod tests {
     #[test]
     fn status_color_2xx_is_green() {
         let info = StatusInfo::from_code(200);
-        assert_eq!(info.ansi(), "\x1b[32m");
+        assert_eq!(info.color(), colored::Color::Green);
     }
 
     #[test]
     fn status_color_4xx_is_yellow() {
         let info = StatusInfo::from_code(404);
-        assert_eq!(info.ansi(), "\x1b[33m");
+        assert_eq!(info.color(), colored::Color::Yellow);
     }
 
     #[test]
     fn status_color_5xx_is_red() {
         let info = StatusInfo::from_code(502);
-        assert_eq!(info.ansi(), "\x1b[31m");
+        assert_eq!(info.color(), colored::Color::Red);
     }
 
     #[test]
     fn latency_color_green_below_100ms() {
         let info = LatencyInfo(std::time::Duration::from_millis(50));
-        assert_eq!(info.ansi(), "\x1b[32m");
+        assert_eq!(info.color(), colored::Color::Green);
     }
 
     #[test]
     fn latency_color_yellow_in_mid_range() {
         let info = LatencyInfo(std::time::Duration::from_millis(200));
-        assert_eq!(info.ansi(), "\x1b[33m");
+        assert_eq!(info.color(), colored::Color::Yellow);
     }
 
     #[test]
     fn latency_color_red_above_500ms() {
         let info = LatencyInfo(std::time::Duration::from_millis(600));
-        assert_eq!(info.ansi(), "\x1b[31m");
+        assert_eq!(info.color(), colored::Color::Red);
     }
 
     #[test]

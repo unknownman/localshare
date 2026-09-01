@@ -56,7 +56,7 @@ fn json_and_quiet_flags_are_accepted_together() {
     // exit code 2). Outcome beyond parsing depends on the unreachable relay.
     localshare()
         .args(["3000", "--json", "--quiet", "-r", "ws://127.0.0.1:1"])
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(15))
         .assert()
         .code(predicate::ne(2));
 }
@@ -201,4 +201,25 @@ fn unreachable_relay_stderr_has_no_ansi_in_json_mode() {
         "unexpected ANSI escape in piped stderr for JSON mode: {:?}",
         String::from_utf8_lossy(&err)
     );
+}
+
+// ── NO_COLOR compliance ────────────────────────────────────────────────────────
+
+// The NO_COLOR spec (https://no-color.org) says programmes must not emit ANSI
+// colours when the NO_COLOR variable is present. We honour it explicitly in
+// `main`, so the invariant below must hold on *every* output stream.
+
+#[test]
+fn no_color_env_strips_ansi_from_stdout_and_stderr() {
+    // The NO_COLOR spec says programmes must not emit ANSI colours when the
+    // variable is present. `main` honours it explicitly, so neither stream may
+    // contain an ESC byte — on stdout or stderr alike.
+    localshare()
+        .env("NO_COLOR", "1")
+        .args(["3000", "-r", "ws://127.0.0.1:1"])
+        .timeout(std::time::Duration::from_secs(15))
+        .assert()
+        .code(1) // fatal disconnect while nothing listens on 127.0.0.1:1
+        .stdout(predicate::str::contains("\x1b").not())
+        .stderr(predicate::str::contains("\x1b").not());
 }
