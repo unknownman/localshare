@@ -442,35 +442,64 @@ async fn dispatch_message(
             // Wrap the message sender so forwarding tasks produce `tungstenite::Message`.
             let (msg_tx, mut msg_rx) = mpsc::channel::<Message>(64);
             let ws_tx = response_tx.clone();
+            let event_tx_clone = event_tx.clone();
+            let start = std::time::Instant::now();
+            let method_clone = method.clone();
+            let path_clone = path.clone();
             tokio::spawn(async move {
+                let mut captured_status: Option<u16> = None;
+                let mut emitted = false;
                 while let Some(m) = msg_rx.recv().await {
+                    match &m.payload {
+                        Payload::ResponseStart { status_code, .. } => {
+                            captured_status = Some(*status_code);
+                        }
+                        Payload::ResponseError { code, .. } => {
+                            let status = match code {
+                                crate::tunnel::protocol::ResponseErrorCode::TargetConnectionRefused => 502,
+                                crate::tunnel::protocol::ResponseErrorCode::TargetTimeout => 504,
+                                crate::tunnel::protocol::ResponseErrorCode::LocalIoError => 502,
+                            };
+                            captured_status = Some(status);
+                            if !emitted {
+                                emitted = true;
+                                let _ = event_tx_clone.send(TunnelEvent::RequestHandled {
+                                    stream_id,
+                                    method: method_clone.clone(),
+                                    path: path_clone.clone(),
+                                    status,
+                                    duration: start.elapsed(),
+                                });
+                            }
+                        }
+                        Payload::ResponseEnd { .. } => {
+                            if !emitted {
+                                emitted = true;
+                                let status = captured_status.unwrap_or(200);
+                                let _ = event_tx_clone.send(TunnelEvent::RequestHandled {
+                                    stream_id,
+                                    method: method_clone.clone(),
+                                    path: path_clone.clone(),
+                                    status,
+                                    duration: start.elapsed(),
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
                     let _ = ws_tx.send(m.into_ws_message()).await;
                 }
             });
 
             process_stream(
                 stream_id,
-                method.clone(),
-                path.clone(),
+                method,
+                path,
                 headers,
                 target.clone(),
                 stream_rx,
                 msg_tx,
             );
-
-            let start = std::time::Instant::now();
-            // Capture these for the RequestHandled event; we'll emit it from the
-            // response path (see ResponseStart handling below) — for now record
-            // metadata in a side table would be needed. As a simplification we
-            // emit a placeholder event here; a production implementation would
-            // track (stream_id → start_time, method, path) in a side table.
-            let _ = event_tx.send(TunnelEvent::RequestHandled {
-                stream_id,
-                method,
-                path,
-                status: 0, // Unknown until ResponseStart is received.
-                duration: start.elapsed(),
-            });
         }
 
         // ── Ongoing request body ──────────────────────────────────────────────

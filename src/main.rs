@@ -1,14 +1,51 @@
-// The public library API is not yet consumed by main(); suppress dead-code
-// lints until CLI wiring is complete in a subsequent task.
-#![allow(dead_code, unused_imports)]
+use clap::Parser;
+use colored::control::set_override;
+use tokio_util::sync::CancellationToken;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod cli;
 mod error;
 mod tunnel;
+mod ui;
 
-use clap::Parser;
+use crate::tunnel::client::{run_tunnel, TunnelConfig};
+use crate::ui::run_ui;
 
 #[tokio::main]
-async fn main() {
-    let _cli = cli::Cli::parse();
+async fn main() -> anyhow::Result<()> {
+    let cli = cli::Cli::parse();
+
+    if std::env::var("NO_COLOR").is_ok() {
+        set_override(false);
+    }
+
+    let subscriber = tracing_subscriber::registry().with(
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+    );
+    subscriber.try_init()?;
+
+    let config = TunnelConfig {
+        relay: cli.relay.clone(),
+        requested_subdomain: cli.subdomain.clone(),
+        target: cli.target.clone(),
+        ..Default::default()
+    };
+
+    let cancel = CancellationToken::new();
+
+    let events = run_tunnel(config, cancel.clone()).await;
+
+    let ctrl_c_cancel = cancel.clone();
+    tokio::spawn(async move {
+        if let Ok(()) = tokio::signal::ctrl_c().await {
+            eprintln!("^C");
+            eprintln!("Stopping localshare...");
+            ctrl_c_cancel.cancel();
+        }
+    });
+
+    run_ui(&cli, events, cancel).await?;
+    eprintln!("Tunnel closed. See you next time!");
+    Ok(())
 }

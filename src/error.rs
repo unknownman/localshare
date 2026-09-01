@@ -9,6 +9,7 @@ pub use crate::tunnel::protocol::RejectReason;
 // ── Relay-level errors ────────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
+#[allow(dead_code)]
 pub enum RelayError {
     #[error("connection to relay {0} failed: {1}")]
     Connect(String, String),
@@ -38,6 +39,7 @@ pub enum RelayError {
 // ── Local forwarding errors ───────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
+#[allow(dead_code)]
 pub enum LocalForwardError {
     #[error("connection refused to local target {0}")]
     TargetConnectionRefused(String),
@@ -55,6 +57,7 @@ pub enum LocalForwardError {
     StreamEnded(String),
 }
 
+#[allow(dead_code)]
 impl LocalForwardError {
     // ── Constructor helpers ───────────────────────────────────────────────────
 
@@ -103,6 +106,7 @@ impl LocalForwardError {
 // ── Protocol-level errors ─────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
+#[allow(dead_code)]
 pub enum ProtocolError {
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
@@ -123,6 +127,7 @@ pub enum ProtocolError {
 // ── CLI-level errors ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
+#[allow(dead_code)]
 pub enum CliError {
     #[error("invalid target: {0}")]
     InvalidTarget(String),
