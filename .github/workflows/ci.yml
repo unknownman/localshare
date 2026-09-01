@@ -31,6 +31,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Type check (all targets)
+        run: cargo check --all-targets
+
       - name: Lint (clippy, deny warnings)
         run: cargo clippy --all-targets -- -D warnings
 

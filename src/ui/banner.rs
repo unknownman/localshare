@@ -66,6 +66,27 @@ impl<'a> Banner<'a> {
     }
 }
 
+/// Length of `s` in terminal columns, ignoring ANSI escape sequences so the
+/// box-drawing alignment is computed from what the user *sees*.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.next() == Some('[') {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 impl<'a> std::fmt::Display for Banner<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let header = format!(
@@ -86,12 +107,17 @@ impl<'a> std::fmt::Display for Banner<'a> {
         );
 
         let lines: Vec<&str> = content.lines().collect();
-        let max_len = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+        let max_len = lines
+            .iter()
+            .map(|l| strip_ansi(l).chars().count())
+            .max()
+            .unwrap_or(0);
         let horizontal = "─".repeat(max_len);
 
         writeln!(f, "┌{}┐", horizontal)?;
         for line in &lines {
-            let padding = " ".repeat(max_len - line.chars().count());
+            let gap = max_len - strip_ansi(line).chars().count();
+            let padding = " ".repeat(gap);
             writeln!(f, "│{}{}│", line, padding)?;
         }
         writeln!(f, "└{}┘", horizontal)?;
@@ -146,5 +172,45 @@ mod tests {
         );
         let text = banner.to_string();
         assert!(text.contains("▲ RECONNECTING (Attempt 3)..."));
+    }
+
+    /// With ANSI colouring *enabled*, every visible line of the banner box must
+    /// still have the same width: alignment is computed from the display width
+    /// (escaping stripped), not from the raw byte/char count.
+    #[test]
+    fn banner_box_width_is_computed_from_visible_chars_when_colored() {
+        colored::control::set_override(true);
+        let text = Banner::new(
+            "https://foo.relay.localshare.dev",
+            "http://127.0.0.1:3000",
+            ConnectionStatus::Live,
+            "relay.localshare.dev",
+            "0.1.0",
+        )
+        .to_string();
+        colored::control::set_override(false);
+
+        assert!(
+            text.contains('\x1b'),
+            "colored override should have injected escape codes"
+        );
+        let widths: Vec<usize> = text
+            .lines()
+            .map(|l| strip_ansi(l).chars().count())
+            .collect();
+        // Skip line 0 (the header above the box); all *box* rows must align.
+        let box_widths = &widths[1..];
+        let first = box_widths[0];
+        assert!(
+            box_widths.iter().all(|&w| w == first),
+            "box lines must align once ANSI is stripped, got {box_widths:?} for: {text:?}"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_removes_color_and_style_codes() {
+        assert_eq!(strip_ansi("plain"), "plain");
+        assert_eq!(strip_ansi("\x1b[1;36mcyan\x1b[0m"), "cyan");
+        assert_eq!(strip_ansi("a\x1b[31mb\x1b[0mc"), "abc");
     }
 }

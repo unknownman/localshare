@@ -161,12 +161,15 @@ async fn reconnect_loop(
             endpoint: endpoint.to_string(),
         });
 
+        let mut connected_this_attempt = false;
+
         match connect_once(
             &config,
             &endpoint,
             last_subdomain.clone(),
             &event_tx,
             &cancel,
+            &mut connected_this_attempt,
         )
         .await
         {
@@ -183,21 +186,26 @@ async fn reconnect_loop(
                 let reason = e.to_string();
                 tracing::warn!(attempt, error = %reason, "relay connection lost");
 
-                // A connection that fails before ever succeeding is treated as
-                // fatal: there is no tunnel to repair, so retrying indefinitely
-                // would just spin. Emit a clean Disconnected and stop. Unless a
-                // shutdown has been requested meanwhile (e.g. Ctrl+C during the
-                // handshake), which should always be a graceful exit 0.
+                // A connection that never got live (the handshake failed) is
+                // fatal if this run has *never* connected: there is no tunnel
+                // to repair, so retrying indefinitely would just spin. Emit a
+                // clean Disconnected and stop. Unless a shutdown has been
+                // requested meanwhile (e.g. Ctrl+C during the handshake), which
+                // should always be a graceful exit 0.
                 if cancel.is_cancelled() {
                     break;
                 }
-                if !ever_connected {
+                if !ever_connected && !connected_this_attempt {
                     let _ = event_tx.send(TunnelEvent::Disconnected {
                         reason,
                         graceful: false,
                     });
                     break;
                 }
+                // We were live (either earlier or just now) and lost the
+                // connection mid-session: that is recoverable, so mark the run
+                // as connected and fall through to the reconnect back-off.
+                ever_connected = true;
 
                 // The relay closed the connection cleanly (a WebSocket close
                 // frame or an orderly EOF), e.g. during a server restart. That
@@ -255,16 +263,21 @@ fn is_graceful_close(e: &RelayError) -> bool {
 // ── Single connection lifecycle ───────────────────────────────────────────────
 
 /// Establish one WebSocket connection, complete the registration handshake,
-/// and run the session until it ends (gracefully or with an error).
+/// Runs one relay session: connect, register, then proxy requests until the
+/// session ends.
 ///
 /// Returns `Ok(subdomain)` on clean exit so the caller can preserve it for
-/// the next reconnect attempt.
+/// the next reconnect attempt. `established` is set to `true` the moment the
+/// registration handshake succeeds, so the caller can distinguish "we were
+/// live and then lost the connection" (recoverable) from "we never got live"
+/// (fatal) even though both surface as `Err`.
 async fn connect_once(
     config: &TunnelConfig,
     endpoint: &RelayEndpoint,
     requested_subdomain: Option<String>,
     event_tx: &broadcast::Sender<TunnelEvent>,
     cancel: &CancellationToken,
+    established: &mut bool,
 ) -> Result<String, RelayError> {
     let url = endpoint.ws_url();
     tracing::debug!(url, "connecting to relay");
@@ -322,6 +335,7 @@ async fn connect_once(
 
     let subdomain = session.subdomain.clone();
     let heartbeat_ms = session.heartbeat_interval_ms;
+    *established = true;
     let _ = event_tx.send(TunnelEvent::Connected { session });
 
     // ── 3. Channels shared between the session tasks ───────────────────────────

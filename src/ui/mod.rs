@@ -220,6 +220,7 @@ async fn run_interactive_mode(
     supports_color: bool,
 ) -> anyhow::Result<()> {
     let mut banner_printed = false;
+    let mut graceful_exit = false;
 
     loop {
         match events.recv().await {
@@ -260,6 +261,7 @@ async fn run_interactive_mode(
                     // "cancelled" is the normal Ctrl+C/SIGTERM path: break out so
                     // the "Stopping localshare..." message below is printed once
                     // the tunnel has fully finished its teardown.
+                    graceful_exit = true;
                     if reason != "cancelled" && !reason.is_empty() {
                         eprintln!("Stopping: {}", reason);
                     }
@@ -276,7 +278,9 @@ async fn run_interactive_mode(
         }
     }
 
-    if banner_printed {
+    // Only a user-initiated shutdown (or a clean relay close) prints this line;
+    // a broken event channel drops out silently.
+    if graceful_exit {
         eprintln!("Stopping localshare...");
     }
     Ok(())

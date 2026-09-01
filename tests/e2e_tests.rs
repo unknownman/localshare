@@ -253,6 +253,44 @@ async fn spawn_mock_local(body: &'static [u8]) -> u16 {
     port
 }
 
+/// Spawn a minimal HTTP server that answers exactly `count` requests, in order,
+/// with `200 OK` and the given body. Connections are served sequentially, which
+/// matches how the client opens one connection per proxied request.
+async fn spawn_mock_local_n(body: &'static [u8], count: usize) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind local");
+    let port = listener.local_addr().expect("local addr").port();
+
+    tokio::spawn(async move {
+        for _ in 0..count {
+            let (mut socket, _) = listener.accept().await.expect("accept local req");
+            let mut buf = vec![0u8; 4096];
+            let mut received = Vec::new();
+            loop {
+                let n = socket.read(&mut buf).await.expect("read request");
+                if n == 0 {
+                    break;
+                }
+                received.extend_from_slice(&buf[..n]);
+                if received.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\n\r\n{}",
+                body.len(),
+                std::str::from_utf8(body).expect("utf8 body")
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        }
+    });
+
+    port
+}
+
 // ── Faulty-then-healthy local server ──────────────────────────────────────────
 
 /// How the local server should misbehave on its *first* accepted connection.
@@ -728,4 +766,178 @@ async fn e2e_target_drop_mid_request_then_next_request_succeeds() {
 #[tokio::test]
 async fn e2e_malformed_response_then_next_request_succeeds() {
     assert_fault_then_next_request_ok(FaultBehavior::MalformedResponse).await;
+}
+
+// ── Sudden network loss: relay connection dropped mid-session ──────────────────
+
+/// Spawn a mock relay that registers a client, proxies one request (200), then
+/// abruptly closes the TCP connection with *no* WebSocket close frame — a brute
+/// network loss, not a graceful relay shutdown. The client must treat that as a
+/// transport error, enter the reconnect loop, register again, and serve request
+/// two (200). Both status codes are reported over `oneshot`.
+async fn spawn_dropping_relay() -> (u16, oneshot::Receiver<(u16, u16)>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind relay");
+    let port = listener.local_addr().expect("relay addr").port();
+    let (tx, rx) = oneshot::channel();
+
+    tokio::spawn(async move {
+        let deadline = Duration::from_secs(20);
+        let mut status1: Option<u16> = None;
+
+        // Connection 1: register, serve request 1, then drop the socket.
+        {
+            let (tcp, _) = listener.accept().await.expect("accept first connection");
+            let mut ws = accept_async(tcp).await.expect("ws handshake 1");
+
+            let first = ws
+                .next()
+                .await
+                .expect("client should send Register")
+                .expect("frame ok");
+            let msg = Message::from_ws(&first).expect("first frame should parse");
+            assert!(matches!(msg.payload, Payload::Register { .. }));
+            ws.send(
+                Message::new(Payload::Registered {
+                    subdomain: "e2e-netloss".into(),
+                    public_url: "https://e2e-netloss.localshare.dev".into(),
+                    heartbeat_interval_ms: 60_000,
+                })
+                .to_binary(),
+            )
+            .await
+            .expect("send Registered");
+
+            ws.send(
+                Message::new(Payload::RequestStart {
+                    stream_id: 1,
+                    method: "GET".into(),
+                    path: "/one".into(),
+                    headers: vec![],
+                })
+                .to_binary(),
+            )
+            .await
+            .expect("send RequestStart 1");
+            ws.send(Message::new(Payload::RequestEnd { stream_id: 1 }).to_binary())
+                .await
+                .expect("send RequestEnd 1");
+
+            while status1.is_none() {
+                let frame = tokio::time::timeout(deadline, ws.next())
+                    .await
+                    .expect("timed out waiting for first response")
+                    .expect("websocket closed before first response")
+                    .expect("websocket error");
+                let Some(msg) = Message::from_ws(&frame) else {
+                    continue;
+                };
+                match msg.payload {
+                    Payload::ClientPing => {
+                        ws.send(Message::new(Payload::RelayPong).to_binary())
+                            .await
+                            .expect("send RelayPong");
+                    }
+                    Payload::ResponseStart { status_code, .. } => status1 = Some(status_code),
+                    _ => {}
+                }
+            }
+            // ws (and its TCP socket) drop here: no close frame, no Unregister.
+        }
+
+        // Connection 2: the client must have reconnected and re-registered.
+        let (tcp, _) = listener.accept().await.expect("accept reconnected client");
+        let mut ws = accept_async(tcp).await.expect("ws handshake 2");
+
+        let first = ws
+            .next()
+            .await
+            .expect("client should re-register")
+            .expect("frame ok");
+        let msg = Message::from_ws(&first).expect("second frame should parse");
+        assert!(matches!(msg.payload, Payload::Register { .. }));
+        ws.send(
+            Message::new(Payload::Registered {
+                subdomain: "e2e-netloss".into(),
+                public_url: "https://e2e-netloss.localshare.dev".into(),
+                heartbeat_interval_ms: 60_000,
+            })
+            .to_binary(),
+        )
+        .await
+        .expect("send Registered");
+
+        ws.send(
+            Message::new(Payload::RequestStart {
+                stream_id: 2,
+                method: "GET".into(),
+                path: "/two".into(),
+                headers: vec![],
+            })
+            .to_binary(),
+        )
+        .await
+        .expect("send RequestStart 2");
+        ws.send(Message::new(Payload::RequestEnd { stream_id: 2 }).to_binary())
+            .await
+            .expect("send RequestEnd 2");
+
+        let mut status2: Option<u16> = None;
+        while status2.is_none() {
+            let frame = tokio::time::timeout(deadline, ws.next())
+                .await
+                .expect("timed out waiting for second response")
+                .expect("websocket closed before second response")
+                .expect("websocket error");
+            let Some(msg) = Message::from_ws(&frame) else {
+                continue;
+            };
+            match msg.payload {
+                Payload::ClientPing => {
+                    ws.send(Message::new(Payload::RelayPong).to_binary())
+                        .await
+                        .expect("send RelayPong");
+                }
+                Payload::ResponseStart { status_code, .. } => status2 = Some(status_code),
+                _ => {}
+            }
+        }
+
+        let _ = tx.send((status1.expect("status1"), status2.expect("status2")));
+    });
+
+    (port, rx)
+}
+
+/// The client must survive a mid-session network loss: after the relay drops
+/// the connection without a close frame, the tunnel reconnects (with backoff),
+/// re-registers, and keeps proxying. A healthy second request proves it.
+#[tokio::test]
+async fn e2e_client_reconnects_and_serves_after_relay_network_loss() {
+    let target_port = spawn_mock_local_n(b"served after reconnect", 2).await;
+    let (relay_port, rx) = spawn_dropping_relay().await;
+
+    let child = spawn_child(relay_port, target_port);
+
+    let (status1, status2) = match tokio::time::timeout(Duration::from_secs(25), rx).await {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => panic!("mock relay task failed: {e:?}"),
+        Err(_) => {
+            let stdout = kill_and_drain(child);
+            panic!("mock relay timed out (client did not reconnect?); child stdout:\n{stdout}");
+        }
+    };
+
+    assert_eq!(status1, 200, "first request must be served before the drop");
+    assert_eq!(
+        status2, 200,
+        "second request must be served after reconnect"
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let stdout = kill_and_drain(child);
+
+    assert!(
+        stdout.contains("\"status\":200"),
+        "client must have logged the proxied request"
+    );
 }
