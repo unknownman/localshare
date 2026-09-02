@@ -527,6 +527,7 @@ async fn wait_for_exit(child: &mut Child, timeout: Duration) -> Option<i32> {
 // ── Shutdown (signal) test plumbing ────────────────────────────────────────────
 
 /// Events reported back from the mock relay used by the signal-shutdown tests.
+#[cfg(unix)]
 #[derive(Debug)]
 enum ShutdownRelayEvent {
     /// The client completed the registration handshake.
@@ -537,6 +538,7 @@ enum ShutdownRelayEvent {
 
 /// Spawn a mock relay that completes the registration handshake, then waits to
 /// observe the client's graceful `Unregister` message.
+#[cfg(unix)]
 async fn spawn_shutdown_relay() -> (u16, mpsc::UnboundedReceiver<ShutdownRelayEvent>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind relay");
     let port = listener.local_addr().expect("relay addr").port();
