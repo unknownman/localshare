@@ -1,4 +1,4 @@
-# Release Notes — localshare v0.1.0
+# Release Notes — localshare v0.1.1
 
 ## Installing
 
@@ -33,8 +33,8 @@ Download the archive for your platform from the [GitHub Releases](https://github
 ### Tagging a release
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 Pushing a `v*` tag triggers the [release workflow](.github/workflows/release.yml), which builds binaries for all target triples, packages them as `.tar.gz` (Unix) or `.zip` (Windows), and attaches them to the GitHub Release.

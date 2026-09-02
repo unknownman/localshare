@@ -41,7 +41,7 @@ localshare 3000
 That's it. `localshare` prints a public URL you can share immediately:
 
 ```
-localshare 0.1.0 • Share your local server instantly
+localshare 0.1.1 • Share your local server instantly
 ┌─────────────────────────────────────────────────────────────────┐
 │ Public URL :  https://a1b2c3.relay.localshare.dev              │
 │ Forwarding :  http://127.0.0.1:3000                            │
@@ -131,7 +131,7 @@ Be aware of these before relying on `localshare` in production:
 - **HTTP/1.1 only.** The forwarding engine handles HTTP/1.1 requests and responses. HTTP/2, WebSockets, and chunked transfer encoding are not yet supported.
 - **Request bodies are buffered.** The entire request body is buffered before forwarding to the local server. Large uploads will increase latency.
 - **Default relay is a convenience, not infrastructure.** The hosted relay at `relay.localshare.dev` is provided for zero-setup demos and development. It is not designed for sustained high-volume production traffic. If you need reliability at scale, run your own relay with `-r`.
-- **No persistent custom domains.** In v0.1.0, subdomains are best-effort and not guaranteed to persist across relay restarts. There is no domain registration, DNS management, or automated TLS certificate provisioning for user domains.
+- **No persistent custom domains.** In v0.1.1, subdomains are best-effort and not guaranteed to persist across relay restarts. There is no domain registration, DNS management, or automated TLS certificate provisioning for user domains.
 
 ## Release targets
 
