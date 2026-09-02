@@ -8,8 +8,7 @@
 
 `localshare` creates a WebSocket tunnel from a public URL to your local machine. Point it at a port, share the link, and your local server is accessible from anywhere — phones, tablets, other laptops, anywhere with a browser.
 
-<!-- DEMO: Uncomment after recording with `vhs demo.tape` -->
-<!-- ![localshare demo](demo.gif) -->
+![localshare demo](demo.gif)
 
 ## Why localshare?
 
