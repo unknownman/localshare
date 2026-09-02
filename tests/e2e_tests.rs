@@ -10,7 +10,9 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
+#[cfg(unix)]
+use tokio::sync::mpsc;
 use tokio_tungstenite::accept_async;
 
 // ── Minimal on-the-wire protocol types ─────────────────────────────────────────
@@ -511,6 +513,7 @@ fn kill_and_drain(mut child: Child) -> String {
 
 /// Poll `try_wait` until the child exits or `timeout` elapses. Returns the
 /// process exit code, or `None` if it never exited in time.
+#[cfg(unix)]
 async fn wait_for_exit(child: &mut Child, timeout: Duration) -> Option<i32> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
