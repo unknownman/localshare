@@ -4,35 +4,33 @@
 
 Output demo.gif
 
-# Set terminal dimensions for a clean, compact recording
-Set Width 90
-Set Height 28
-Set FontSize 14
+Set Width 900
+Set Height 600
+Set FontSize 16
+Set TypeSpeed 50ms
+Set Theme "Catppuccin Mocha"
 
-# Start a dummy local HTTP server in the background
+# Start a dummy HTTP server in the background
 Shell "python3 -m http.server 3000 &>/dev/null &"
 Sleep 500ms
 
-# Launch localshare against the dummy server
+# Launch localshare
 Type "localshare 3000"
 Enter
+Sleep 4s
 
-# Wait for the banner + QR code to fully render
-Sleep 3s
-
-# Open a new pane and curl the public URL to trigger a 200 OK in the live log
-# We use the URL from the banner — replace with the actual public URL on record
-# The grep + sed extracts the URL dynamically from localshare's JSON output
-# Alternatively, hardcode a known URL if using a persistent relay
-Split
-Type "curl -s -o /dev/null -w '%{http_code}' https://REPLACE_WITH_PUBLIC_URL"
-Enter
+# Simulate incoming requests to populate the live request log.
+# These curl calls hit the local server directly through the public URL.
+# The relay-assigned subdomain is captured at record time — replace the
+# placeholder below with the actual URL shown in the banner, or pipe
+# localshare --json output to extract it automatically.
+Shell "curl -s -o /dev/null http://127.0.0.1:3000/"
+Sleep 800ms
+Shell "curl -s -o /dev/null http://127.0.0.1:3000/index.html"
+Sleep 800ms
+Shell "curl -s -o /dev/null http://127.0.0.1:3000/favicon.ico"
 Sleep 2s
 
-# Switch back to the main pane to show the live request log
-Focus
-Sleep 2s
-
-# Demonstrate graceful shutdown
+# Show the graceful shutdown
 Type "C-c"
 Sleep 1s

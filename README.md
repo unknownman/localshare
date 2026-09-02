@@ -6,34 +6,36 @@
 
 **Instantly share a local HTTP server with the internet. No accounts. No config. Beautiful terminal UX.**
 
-`localshare` creates a secure WebSocket tunnel from a public URL to your local machine. Point it at a port, share the link, and your local server is accessible from anywhere — phones, tablets, other laptops, anywhere with a browser.
+`localshare` creates a WebSocket tunnel from a public URL to your local machine. Point it at a port, share the link, and your local server is accessible from anywhere — phones, tablets, other laptops, anywhere with a browser.
 
-<!-- DEMO: Replace with the output of `vhs demo.tape` once recorded -->
+<!-- DEMO: Uncomment after recording with `vhs demo.tape` -->
 <!-- ![localshare demo](demo.gif) -->
 
 ## Why localshare?
 
 There are other tools that expose localhost to the internet. Here's how `localshare` compares:
 
-| | **localshare** | **ngrok** | **localtunnel** | **bore** |
-| --- | --- | --- | --- | --- |
-| **No account required** | ✅ | ❌ (mandatory) | ✅ | ✅ |
-| **No install beyond binary** | ✅ | ⚠️ (config files) | ❌ (needs Node.js) | ✅ |
-| **HTTP/HTTPS forwarding** | ✅ | ✅ | ✅ | ❌ (raw TCP) |
-| **Request logging in terminal** | ✅ | ✅ | ❌ | ❌ |
-| **QR code for mobile** | ✅ | ❌ | ❌ | ❌ |
-| **Self-hosted relay** | ✅ | ✅ (paid) | ❌ | ✅ |
-| **Written in Rust** | ✅ | ❌ (Go) | ❌ (JS) | ✅ |
+| | **localshare** | **ngrok** | **localtunnel** | **bore** | **cloudflared** |
+| --- | --- | --- | --- | --- | --- |
+| **No account required** | ✅ | ❌ (mandatory) | ✅ | ✅ | ⚠️ (Cloudflare acct) |
+| **No install beyond binary** | ✅ | ⚠️ (config files) | ❌ (needs Node.js) | ✅ | ⚠️ (config files) |
+| **HTTP/HTTPS forwarding** | ✅ | ✅ | ✅ | ❌ (raw TCP) | ✅ |
+| **Request logging in terminal** | ✅ | ✅ | ❌ | ❌ | ❌ |
+| **QR code for mobile** | ✅ | ❌ | ❌ | ❌ | ❌ |
+| **Self-hosted relay** | ✅ | ✅ (paid) | ❌ | ✅ | ❌ |
+| **Written in Rust** | ✅ | ❌ (Go) | ❌ (JS) | ✅ | ❌ (Go) |
 
-`localshare` is the zero-friction option: no auth tokens, no session limits, no Node.js dependency, and a polished terminal experience with colour-coded request logs and a scan-to-open QR code. If you need enterprise features like custom domains, OAuth, or webhook inspection, ngrok is the right tool. If you want the fastest possible raw TCP tunnel, bore is excellent. For everything else — quick sharing, demos, testing webhooks on your phone, debugging an API on the local network — `localshare` gets out of your way.
+`localshare` is the zero-friction option: no auth tokens, no session limits, no Node.js dependency, and a polished terminal experience with colour-coded request logs and a scan-to-open QR code. If you need enterprise features like custom domains, OAuth, or webhook inspection, ngrok is the right tool. If you want the fastest possible raw TCP tunnel, bore is excellent. If you're already on Cloudflare and want tightly integrated DNS, cloudflared is a natural fit. For everything else — quick sharing, demos, testing webhooks on your phone, debugging an API on the local network — `localshare` gets out of your way.
 
 ## Quick start
 
 ```bash
-# Install
 cargo install localshare
+```
 
-# Share a local server
+Share a local server:
+
+```bash
 localshare 3000
 ```
 
@@ -128,9 +130,9 @@ Pre-built binaries for Linux (`x86_64`, `aarch64`), macOS (`x86_64`, `aarch64`),
 Be aware of these before relying on `localshare` in production:
 
 - **HTTP/1.1 only.** The forwarding engine handles HTTP/1.1 requests and responses. HTTP/2, WebSockets, and chunked transfer encoding are not yet supported.
+- **Request bodies are buffered.** The entire request body is buffered before forwarding to the local server. Large uploads will increase latency.
 - **Default relay is a convenience, not infrastructure.** The hosted relay at `relay.localshare.dev` is provided for zero-setup demos and development. It is not designed for sustained high-volume production traffic. If you need reliability at scale, run your own relay with `-r`.
-- **No persistent custom domains.** In v1.0, subdomains are best-effort and not guaranteed to persist across relay restarts. There is no domain registration or DNS management.
-- **No request body streaming.** Request bodies are buffered before forwarding to the local server. Large uploads may increase latency.
+- **No persistent custom domains.** In v0.1.0, subdomains are best-effort and not guaranteed to persist across relay restarts. There is no domain registration, DNS management, or automated TLS certificate provisioning for user domains.
 
 ## Release targets
 
