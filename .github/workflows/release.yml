@@ -9,8 +9,8 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
-    name: Build and Release
+  build:
+    name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -78,16 +78,39 @@ jobs:
           Compress-Archive -Path localshare.exe -DestinationPath ..\..\..\localshare-${{ matrix.target }}.zip
         shell: powershell
 
-      - name: Upload Release Asset
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: localshare-${{ matrix.target }}
+          path: localshare-${{ matrix.target }}.${{ matrix.ext }}
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: List assets
+        run: ls -la assets
+
+      - name: Attach binaries to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            localshare-${{ matrix.target }}.${{ matrix.ext }}
+          files: assets/*
           generate_release_notes: true
 
   publish-crate:
     name: Publish to crates.io
-    needs: build-and-release
+    needs: release
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
