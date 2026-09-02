@@ -4,33 +4,30 @@
 
 Output demo.gif
 
-Set Width 900
-Set Height 600
-Set FontSize 16
-Set TypeSpeed 50ms
+Set Width 1000
+Set Height 650
+Set FontSize 15
+Set TypeSpeed 60ms
 Set Theme "Catppuccin Mocha"
+Set WindowBar Colorful
+Set Padding 20
 
-# Start a dummy HTTP server in the background
-Shell "python3 -m http.server 3000 &>/dev/null &"
-Sleep 500ms
+# 1. Setup background tasks silently
+Hide
+# Start a dummy HTTP server
+Shell "python3 -m http.server 3000 &> /dev/null &"
+# Schedule HTTP requests to the PUBLIC URL in the background to populate the log UI.
+# This proves the public tunnel works without needing a valid local IP.
+Shell "(sleep 5; curl -s -o /dev/null https://my-demo.relay.localshare.dev/; sleep 1.5; curl -s -X POST -o /dev/null https://my-demo.relay.localshare.dev/api/webhooks/stripe; sleep 1.5; curl -s -o /dev/null https://my-demo.relay.localshare.dev/favicon.ico) &"
+Show
 
-# Launch localshare
-Type "localshare 3000"
+# 2. Launch localshare with a deterministic subdomain
+Type "localshare 3000 -s my-demo"
 Enter
-Sleep 4s
 
-# Simulate incoming requests to populate the live request log.
-# These curl calls hit the local server directly through the public URL.
-# The relay-assigned subdomain is captured at record time — replace the
-# placeholder below with the actual URL shown in the banner, or pipe
-# localshare --json output to extract it automatically.
-Shell "curl -s -o /dev/null http://127.0.0.1:3000/"
-Sleep 800ms
-Shell "curl -s -o /dev/null http://127.0.0.1:3000/index.html"
-Sleep 800ms
-Shell "curl -s -o /dev/null http://127.0.0.1:3000/favicon.ico"
+# 3. Wait while the background curls hit the public URL and populate the UI
+Sleep 10s
+
+# 4. Show graceful shutdown
+Ctrl+C
 Sleep 2s
-
-# Show the graceful shutdown
-Type "C-c"
-Sleep 1s
