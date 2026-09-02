@@ -7,7 +7,6 @@ Output demo.gif
 Set Width 1000
 Set Height 650
 Set FontSize 15
-Set TypeSpeed 60ms
 Set Theme "Catppuccin Mocha"
 Set WindowBar Colorful
 Set Padding 20
