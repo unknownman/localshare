@@ -27,12 +27,12 @@ jobs:
             cross: true
             ext: tar.gz
           - build: macos-x86_64
-            os: macos-13
+            os: macos-latest
             target: x86_64-apple-darwin
             cross: false
             ext: tar.gz
           - build: macos-aarch64
-            os: macos-14
+            os: macos-latest
             target: aarch64-apple-darwin
             cross: false
             ext: tar.gz
