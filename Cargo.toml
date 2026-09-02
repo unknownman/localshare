@@ -2,7 +2,7 @@
 name = "localshare"
 version = "0.1.0"
 edition = "2021"
-description = "Instantly share a local HTTP server with the internet from the terminal"
+description = "Instantly share a local HTTP server with the internet"
 license = "MIT"
 authors = ["Ali Joder <ali.masoudi.alavi@gmail.com>"]
 repository = "https://github.com/unknownman/localshare"
