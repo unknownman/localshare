@@ -49,7 +49,11 @@ async fn run() -> i32 {
 
     let cancel = CancellationToken::new();
 
-    let events = run_tunnel(config, cancel.clone()).await;
+    let events = if std::env::var("LOCALSHARE_DEMO_MODE").is_ok() {
+        run_demo_mode(config, cancel.clone())
+    } else {
+        run_tunnel(config, cancel.clone()).await
+    };
 
     // Failures to install signal handlers happen before the UI loop starts;
     // surface them as a clean, coloured error rather than a panic.
@@ -112,6 +116,77 @@ fn install_shutdown_listener(cancel: CancellationToken) -> std::io::Result<()> {
 /// 0 → `error`, 1 (single `-v`) → `info`, 2 (`-vv`) → `debug`, 3+ → `trace`.
 /// Logs are written to stderr so they never corrupt stdout output (JSON mode,
 /// the QR code, or the interactive request log).
+/// Hidden mock event generator for VHS demo recordings.
+///
+/// Activated when `LOCALSHARE_DEMO_MODE` is set. Emits a deterministic sequence
+/// of `TunnelEvent`s that populate the UI banner and live request log without
+/// requiring a real relay connection or internet access.
+fn run_demo_mode(
+    config: TunnelConfig,
+    cancel: CancellationToken,
+) -> tokio::sync::broadcast::Receiver<crate::tunnel::client::TunnelEvent> {
+    use crate::tunnel::client::{TunnelEvent, TunnelSession};
+    let (tx, rx) = tokio::sync::broadcast::channel(16);
+    let subdomain = config
+        .requested_subdomain
+        .unwrap_or_else(|| "demo".to_string());
+    let public_url = format!("https://{}.relay.localshare.dev", subdomain);
+
+    tokio::spawn(async move {
+        // 1. Simulate connection delay
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        let _ = tx.send(TunnelEvent::Connected {
+            session: TunnelSession {
+                subdomain,
+                public_url,
+                heartbeat_interval_ms: 60_000,
+            },
+        });
+
+        // 2. Simulate a GET request
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let _ = tx.send(TunnelEvent::RequestHandled {
+            stream_id: 1,
+            method: "GET".into(),
+            path: "/".into(),
+            status: 200,
+            duration: std::time::Duration::from_millis(14),
+            hint: None,
+        });
+
+        // 3. Simulate a POST webhook
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        let _ = tx.send(TunnelEvent::RequestHandled {
+            stream_id: 2,
+            method: "POST".into(),
+            path: "/api/webhooks/stripe".into(),
+            status: 200,
+            duration: std::time::Duration::from_millis(42),
+            hint: None,
+        });
+
+        // 4. Simulate a 404 error
+        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        let _ = tx.send(TunnelEvent::RequestHandled {
+            stream_id: 3,
+            method: "GET".into(),
+            path: "/favicon.ico".into(),
+            status: 404,
+            duration: std::time::Duration::from_millis(2),
+            hint: None,
+        });
+
+        // 5. Wait for the Ctrl+C signal from the tape
+        cancel.cancelled().await;
+        let _ = tx.send(TunnelEvent::Disconnected {
+            reason: "cancelled".into(),
+            graceful: true,
+        });
+    });
+
+    rx
+}
+
 fn init_tracing(verbose: u8) {
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
